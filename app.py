@@ -782,18 +782,58 @@ def render_power_rankings(
     players: pd.DataFrame,
     picks: pd.DataFrame,
 ) -> None:
-    render_brand("League", "Open multiple franchises to compare rosters side by side")
+    render_brand("League", "Compare franchise strength and open multiple rosters")
 
     render_html(
         """
         <div class="gm-card">
-          <b>League view:</b> expand any franchise below. Multiple teams can remain
-          open at the same time so you can compare roster construction, positional
-          ranks, draft capital and overall franchise profile.
+          <b>League view:</b> the positional summary for every franchise remains
+          visible at all times. Expand any team below to inspect its full roster,
+          draft capital and GM profile. Multiple teams can stay open together.
         </div>
         """
     )
 
+    st.markdown("### League Power Rankings")
+    total_max = max(float(teams["Total_Value"].max()), 1)
+
+    for _, row in teams.iterrows():
+        qb_w = max(3, row["QB"] / total_max * 100)
+        rb_w = max(3, row["RB"] / total_max * 100)
+        wr_w = max(3, row["WR"] / total_max * 100)
+        te_w = max(3, row["TE"] / total_max * 100)
+        pk_w = max(3, row["Pick_Value"] / total_max * 100)
+        total = qb_w + rb_w + wr_w + te_w + pk_w
+
+        render_html(
+            f"""
+            <div class="power-row">
+              <div class="power-top">
+                <div class="team-rank">{int(row["Overall_Rank"])}</div>
+                <div class="team-name">{clean(row["Team"])}</div>
+                <div class="power-bar">
+                  <div class="seg-qb" style="width:{qb_w/total*100:.1f}%"></div>
+                  <div class="seg-rb" style="width:{rb_w/total*100:.1f}%"></div>
+                  <div class="seg-wr" style="width:{wr_w/total*100:.1f}%"></div>
+                  <div class="seg-te" style="width:{te_w/total*100:.1f}%"></div>
+                  <div class="seg-pick" style="width:{pk_w/total*100:.1f}%"></div>
+                </div>
+                <div class="status-tag">{clean(row["Window"])}</div>
+              </div>
+              <div class="power-meta">
+                <span>Total {int(row["Total_Value"]):,}</span>
+                <span>QB #{int(row["QB_Rank"])}</span>
+                <span>RB #{int(row["RB_Rank"])}</span>
+                <span>WR #{int(row["WR_Rank"])}</span>
+                <span>TE #{int(row["TE_Rank"])}</span>
+                <span>Picks #{int(row["Pick_Rank"])}</span>
+                <span>Age {row["Avg_Age"]:.1f}</span>
+              </div>
+            </div>
+            """
+        )
+
+    st.markdown("### Franchise Rosters")
     my_team = find_my_team(teams["Team"].tolist())
 
     for _, row in teams.iterrows():
