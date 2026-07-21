@@ -328,8 +328,12 @@ st.markdown(
       overflow:hidden;
     }
     [data-testid="stExpander"] details summary {
-      padding:.75rem .9rem;
+      padding:.82rem 1rem;
       font-weight:800;
+      background:var(--panel);
+    }
+    [data-testid="stExpander"] details summary:hover {
+      background:var(--panel2);
     }
     [data-testid="stExpander"] details[open] summary {
       border-bottom:1px solid var(--border);
@@ -782,22 +786,28 @@ def render_power_rankings(
     players: pd.DataFrame,
     picks: pd.DataFrame,
 ) -> None:
-    render_brand("League", "Compare franchise strength and open multiple rosters")
+    render_brand(
+        "League",
+        "Expand any power-ranking row to inspect that franchise"
+    )
 
     render_html(
         """
         <div class="gm-card">
-          <b>League view:</b> the positional summary for every franchise remains
-          visible at all times. Expand any team below to inspect its full roster,
-          draft capital and GM profile. Multiple teams can stay open together.
+          <b>League view:</b> each power-ranking summary is now the expandable
+          franchise control. Open multiple teams at once to compare positional
+          strength, roster construction, draft capital and GM profile.
         </div>
         """
     )
 
-    st.markdown("### League Power Rankings")
+    my_team = find_my_team(teams["Team"].tolist())
     total_max = max(float(teams["Total_Value"].max()), 1)
 
     for _, row in teams.iterrows():
+        team = row["Team"]
+        roster = players[players["Team"] == team].copy()
+
         qb_w = max(3, row["QB"] / total_max * 100)
         rb_w = max(3, row["RB"] / total_max * 100)
         wr_w = max(3, row["WR"] / total_max * 100)
@@ -805,62 +815,38 @@ def render_power_rankings(
         pk_w = max(3, row["Pick_Value"] / total_max * 100)
         total = qb_w + rb_w + wr_w + te_w + pk_w
 
-        render_html(
-            f"""
-            <div class="power-row">
-              <div class="power-top">
-                <div class="team-rank">{int(row["Overall_Rank"])}</div>
-                <div class="team-name">{clean(row["Team"])}</div>
-                <div class="power-bar">
-                  <div class="seg-qb" style="width:{qb_w/total*100:.1f}%"></div>
-                  <div class="seg-rb" style="width:{rb_w/total*100:.1f}%"></div>
-                  <div class="seg-wr" style="width:{wr_w/total*100:.1f}%"></div>
-                  <div class="seg-te" style="width:{te_w/total*100:.1f}%"></div>
-                  <div class="seg-pick" style="width:{pk_w/total*100:.1f}%"></div>
-                </div>
-                <div class="status-tag">{clean(row["Window"])}</div>
-              </div>
-              <div class="power-meta">
-                <span>Total {int(row["Total_Value"]):,}</span>
-                <span>QB #{int(row["QB_Rank"])}</span>
-                <span>RB #{int(row["RB_Rank"])}</span>
-                <span>WR #{int(row["WR_Rank"])}</span>
-                <span>TE #{int(row["TE_Rank"])}</span>
-                <span>Picks #{int(row["Pick_Rank"])}</span>
-                <span>Age {row["Avg_Age"]:.1f}</span>
-              </div>
-            </div>
-            """
-        )
-
-    st.markdown("### Franchise Rosters")
-    my_team = find_my_team(teams["Team"].tolist())
-
-    for _, row in teams.iterrows():
-        team = row["Team"]
-        roster = players[players["Team"] == team].copy()
-        label = (
+        summary_label = (
             f'#{int(row["Overall_Rank"])}  {team}  ·  {row["Window"]}  ·  '
             f'QB #{int(row["QB_Rank"])}  RB #{int(row["RB_Rank"])}  '
             f'WR #{int(row["WR_Rank"])}  TE #{int(row["TE_Rank"])}  '
             f'Picks #{int(row["Pick_Rank"])}'
         )
 
-        with st.expander(label, expanded=(team == my_team)):
+        with st.expander(summary_label, expanded=(team == my_team)):
             render_html(
                 f"""
-                <div class="league-header">
-                  <div class="league-avatar">{clean(team[:2].upper())}</div>
-                  <div>
-                    <div class="league-title">{clean(team)}</div>
-                    <div class="league-sub">
-                      Total value {int(row["Total_Value"]):,} ·
-                      Player value {int(row["Player_Value"]):,} ·
-                      Pick value {int(row["Pick_Value"]):,} ·
-                      Average age {row["Avg_Age"]:.1f}
+                <div class="power-row" style="margin-bottom:.85rem">
+                  <div class="power-top">
+                    <div class="team-rank">{int(row["Overall_Rank"])}</div>
+                    <div class="team-name">{clean(team)}</div>
+                    <div class="power-bar">
+                      <div class="seg-qb" style="width:{qb_w/total*100:.1f}%"></div>
+                      <div class="seg-rb" style="width:{rb_w/total*100:.1f}%"></div>
+                      <div class="seg-wr" style="width:{wr_w/total*100:.1f}%"></div>
+                      <div class="seg-te" style="width:{te_w/total*100:.1f}%"></div>
+                      <div class="seg-pick" style="width:{pk_w/total*100:.1f}%"></div>
                     </div>
+                    <div class="status-tag">{clean(row["Window"])}</div>
                   </div>
-                  <div class="window">{clean(row["Window"])}</div>
+                  <div class="power-meta">
+                    <span>Total {int(row["Total_Value"]):,}</span>
+                    <span>QB #{int(row["QB_Rank"])}</span>
+                    <span>RB #{int(row["RB_Rank"])}</span>
+                    <span>WR #{int(row["WR_Rank"])}</span>
+                    <span>TE #{int(row["TE_Rank"])}</span>
+                    <span>Picks #{int(row["Pick_Rank"])}</span>
+                    <span>Age {row["Avg_Age"]:.1f}</span>
+                  </div>
                 </div>
                 """
             )
@@ -902,7 +888,8 @@ def render_power_rankings(
                   <b>GM profile:</b> strongest room is <b>{strongest}</b>
                   (#{pos_ranks[strongest]}). Largest positional weakness is
                   <b>{weakest}</b> (#{pos_ranks[weakest]}). Draft capital ranks
-                  <b>#{int(row["Pick_Rank"])}</b>.
+                  <b>#{int(row["Pick_Rank"])}</b>. The franchise is currently
+                  classified as <b>{clean(row["Window"])}</b>.
                 </div>
                 """
             )
