@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import time
+import textwrap
 from typing import Any
 
 import pandas as pd
@@ -23,6 +24,12 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+def render_html(markup: str) -> None:
+    """Render generated HTML without Markdown treating indentation as code."""
+    st.markdown(textwrap.dedent(markup).strip(), unsafe_allow_html=True)
+
 
 st.markdown(
     """
@@ -559,7 +566,7 @@ def pos_class(pos: str) -> str:
 
 
 def render_brand(title: str, subtitle: str) -> None:
-    st.markdown(
+    render_html(
         f"""
         <div class="brand">
           <div class="brand-badge">FO</div>
@@ -568,8 +575,7 @@ def render_brand(title: str, subtitle: str) -> None:
             <p>{clean(subtitle)}</p>
           </div>
         </div>
-        """,
-        unsafe_allow_html=True,
+        """
     )
 
 
@@ -594,20 +600,18 @@ def render_player_card(row: pd.Series) -> str:
 
 
 def render_position_column(roster: pd.DataFrame, pos: str, rank: int, color_class: str) -> None:
-    st.markdown(
-        f'<div class="position-header {color_class}"><span>{pos} Rank</span><span>{rank}</span></div>',
-        unsafe_allow_html=True,
+    render_html(
+        f'<div class="position-header {color_class}"><span>{pos} Rank</span><span>{rank}</span></div>'
     )
     data = roster[roster["Position"] == pos].sort_values("Value", ascending=False).head(9)
     if data.empty:
-        st.markdown(
-            '<div class="position-row"><span></span><span>No players</span><span></span><span></span></div>',
-            unsafe_allow_html=True,
+        render_html(
+            '<div class="position-row"><span></span><span>No players</span><span></span><span></span></div>'
         )
         return
     for _, row in data.iterrows():
         p_rank = "—" if pd.isna(row["Position Rank"]) else int(row["Position Rank"])
-        st.markdown(
+        render_html(
             f"""
             <div class="position-row">
               <img class="mini-photo" src="{clean(row["Image"])}"
@@ -616,22 +620,20 @@ def render_position_column(roster: pd.DataFrame, pos: str, rank: int, color_clas
               <span class="value">{int(row["Value"])}</span>
               <span class="small-rank">{p_rank}</span>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
 
 
 def render_pick_column(picks: pd.DataFrame, team: str, rank: int) -> None:
-    st.markdown(
-        f'<div class="position-header pick"><span>PICKS</span><span>{rank}</span></div>',
-        unsafe_allow_html=True,
+    render_html(
+        f'<div class="position-header pick"><span>PICKS</span><span>{rank}</span></div>'
     )
     data = picks[picks["Current Owner"] == team].sort_values(["Season", "Round"]).head(10)
     for _, row in data.iterrows():
         label = f'{int(row["Season"])} R{int(row["Round"])}'
         if row["Traded"]:
             label += f' ({str(row["Original Team"])[:9]})'
-        st.markdown(
+        render_html(
             f"""
             <div class="position-row">
               <span style="font-size:1.15rem">📋</span>
@@ -639,8 +641,7 @@ def render_pick_column(picks: pd.DataFrame, team: str, rank: int) -> None:
               <span class="value">{int(row["Value"])}</span>
               <span class="small-rank">↔</span>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
 
 
@@ -662,7 +663,7 @@ def render_summary_cards(row: pd.Series) -> None:
         """
         for label, value, note in cards
     )
-    st.markdown(f'<div class="summary-grid">{html_cards}</div>', unsafe_allow_html=True)
+    render_html(f'<div class="summary-grid">{html_cards}</div>')
 
 
 def render_team_review(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame, league_name: str) -> None:
@@ -672,7 +673,7 @@ def render_team_review(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.Dat
     row = teams[teams["Team"] == selected].iloc[0]
     roster = players[players["Team"] == selected].sort_values(["Status", "Value"], ascending=[True, False])
 
-    st.markdown(
+    render_html(
         f"""
         <div class="league-header">
           <div class="league-avatar">WW</div>
@@ -682,17 +683,16 @@ def render_team_review(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.Dat
           </div>
           <div class="window">{clean(row["Window"])}</div>
         </div>
-        """,
-        unsafe_allow_html=True,
+        """
     )
 
     render_summary_cards(row)
 
-    st.markdown('<div class="section-title"><h3>Roster</h3><span style="color:#98a2b3">Scroll horizontally</span></div>', unsafe_allow_html=True)
+    render_html('<div class="section-title"><h3>Roster</h3><span style="color:#98a2b3">Scroll horizontally</span></div>')
     cards = "".join(render_player_card(r) for _, r in roster.head(18).iterrows())
-    st.markdown(f'<div class="roster-strip">{cards}</div>', unsafe_allow_html=True)
+    render_html(f'<div class="roster-strip">{cards}</div>')
 
-    st.markdown('<div class="section-title"><h3>Roster Construction</h3></div>', unsafe_allow_html=True)
+    render_html('<div class="section-title"><h3>Roster Construction</h3></div>')
     cols = st.columns([1, 1, 1.2, 1, 1.1], gap="small")
     with cols[0]:
         render_position_column(roster, "QB", int(row["QB_Rank"]), "qb-bg")
@@ -713,7 +713,7 @@ def render_team_review(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.Dat
     }
     strongest = min(pos_ranks, key=pos_ranks.get)
     weakest = max(pos_ranks, key=pos_ranks.get)
-    st.markdown(
+    render_html(
         f"""
         <div class="gm-card">
           <b>GM Review:</b> {clean(selected)} currently profiles as <b>{clean(row["Window"])}</b>.
@@ -721,8 +721,7 @@ def render_team_review(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.Dat
           positional gap is <b>{weakest}</b> (#{pos_ranks[weakest]}). The franchise ranks
           <b>#{int(row["Overall_Rank"])}</b> overall when roster value and draft capital are combined.
         </div>
-        """,
-        unsafe_allow_html=True,
+        """
     )
 
 
@@ -738,7 +737,7 @@ def render_power_rankings(teams: pd.DataFrame) -> None:
         pk_w = max(3, row["Pick_Value"] / total_max * 100)
         total = qb_w + rb_w + wr_w + te_w + pk_w
 
-        st.markdown(
+        render_html(
             f"""
             <div class="power-row">
               <div class="power-top">
@@ -763,8 +762,7 @@ def render_power_rankings(teams: pd.DataFrame) -> None:
                 <span>Age {row["Avg_Age"]:.1f}</span>
               </div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
 
 
@@ -813,12 +811,12 @@ def render_trade_calculator(players: pd.DataFrame, picks: pd.DataFrame, teams: p
 
     left, right = st.columns(2, gap="large")
     with left:
-        st.markdown("### They Receive")
+        render_html("### They Receive")
         give = st.multiselect("Add assets", list(all_options.keys()), key="give")
         give_value = sum(all_options[x] for x in give)
         st.metric("Package Value", f"{give_value:,}")
     with right:
-        st.markdown("### I Receive")
+        render_html("### I Receive")
         receive = st.multiselect("Add assets", list(all_options.keys()), key="receive")
         receive_value = sum(all_options[x] for x in receive)
         st.metric("Package Value", f"{receive_value:,}")
