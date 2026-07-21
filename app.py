@@ -468,7 +468,18 @@ def build_picks(bundle: dict[str, Any]) -> pd.DataFrame:
     }
     current_season = int(league.get("season") or 2026)
     rounds = int((league.get("settings") or {}).get("draft_rounds") or 3)
-    seasons = [current_season, current_season + 1, current_season + 2]
+
+    traded_seasons = {
+        int(pick.get("season"))
+        for pick in bundle["traded_picks"]
+        if str(pick.get("season", "")).isdigit()
+    }
+    # Always show the current three-year horizon, while also retaining any
+    # additional seasons already represented in Sleeper traded-pick records.
+    seasons = sorted(
+        {current_season, current_season + 1, current_season + 2}
+        | traded_seasons
+    )
 
     ownership: dict[tuple[int, int, int], int] = {}
     for season in seasons:
@@ -638,11 +649,26 @@ def render_pick_column(picks: pd.DataFrame, team: str, rank: int) -> None:
     render_html(
         f'<div class="position-header pick"><span>PICKS</span><span>{rank}</span></div>'
     )
-    data = picks[picks["Current Owner"] == team].sort_values(["Season", "Round"]).head(10)
-    for _, row in data.iterrows():
+    data = picks[picks["Current Owner"] == team].sort_values(
+        ["Season", "Round", "Original Team"]
+    )
+    if data.empty:
+        render_html(
+            """
+            <div class="position-row">
+              <span style="font-size:1.15rem">📋</span>
+              <span class="name-clip">No future picks found</span>
+              <span class="value">—</span>
+              <span class="small-rank">—</span>
+            </div>
+            """
+        )
+        return
+
+    for _, row in data.head(12).iterrows():
         label = f'{int(row["Season"])} R{int(row["Round"])}'
         if row["Traded"]:
-            label += f' ({str(row["Original Team"])[:9]})'
+            label += f' ({str(row["Original Team"])[:12]})'
         render_html(
             f"""
             <div class="position-row">
@@ -735,8 +761,61 @@ def render_team_review(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.Dat
     )
 
 
-def render_power_rankings(teams: pd.DataFrame) -> None:
-    render_brand("League Power Rankings", "Compare every franchise from a GM perspective")
+def render_power_rankings(
+    teams: pd.DataFrame,
+    players: pd.DataFrame,
+    picks: pd.DataFrame,
+) -> None:
+    render_brand("League", "Inspect every roster and compare franchise strength")
+
+    team_names = teams["Team"].tolist()
+    selected_team = st.selectbox(
+        "View roster",
+        team_names,
+        index=0,
+        key="league_roster_selector",
+    )
+    selected_row = teams[teams["Team"] == selected_team].iloc[0]
+    selected_roster = players[players["Team"] == selected_team].copy()
+
+    render_html(
+        f"""
+        <div class="league-header">
+          <div class="league-avatar">{clean(selected_team[:2].upper())}</div>
+          <div>
+            <div class="league-title">{clean(selected_team)}</div>
+            <div class="league-sub">
+              Overall #{int(selected_row["Overall_Rank"])} ·
+              Player value {int(selected_row["Player_Value"]):,} ·
+              Pick value {int(selected_row["Pick_Value"]):,}
+            </div>
+          </div>
+          <div class="window">{clean(selected_row["Window"])}</div>
+        </div>
+        """
+    )
+
+    cols = st.columns([1, 1, 1.2, 1, 1.1], gap="small")
+    with cols[0]:
+        render_position_column(
+            selected_roster, "QB", int(selected_row["QB_Rank"]), "qb-bg"
+        )
+    with cols[1]:
+        render_position_column(
+            selected_roster, "RB", int(selected_row["RB_Rank"]), "rb-bg"
+        )
+    with cols[2]:
+        render_position_column(
+            selected_roster, "WR", int(selected_row["WR_Rank"]), "wr-bg"
+        )
+    with cols[3]:
+        render_position_column(
+            selected_roster, "TE", int(selected_row["TE_Rank"]), "te-bg"
+        )
+    with cols[4]:
+        render_pick_column(picks, selected_team, int(selected_row["Pick_Rank"]))
+
+    st.markdown("### League Power Rankings")
     total_max = max(float(teams["Total_Value"].max()), 1)
 
     for _, row in teams.iterrows():
@@ -896,7 +975,7 @@ def main() -> None:
     if page == "My Team":
         render_team_review(teams, players, picks, bundle["league"].get("name", "Weekend Warriors"))
     elif page == "League":
-        render_power_rankings(teams)
+        render_power_rankings(teams, players, picks)
     elif page == "Rankings":
         render_rankings(players)
     elif page == "Trade Centre":
