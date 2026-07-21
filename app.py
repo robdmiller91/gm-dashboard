@@ -411,6 +411,43 @@ st.markdown(
     .team-gm-line {
       margin-top:.75rem; color:var(--muted); font-size:.78rem;
     }
+    .trade-card {
+      background:var(--panel); border:1px solid var(--border);
+      border-radius:16px; padding:1rem; margin-bottom:.8rem;
+    }
+    .trade-card-top {
+      display:flex; justify-content:space-between; gap:.75rem;
+      align-items:center; margin-bottom:.7rem;
+    }
+    .trade-grid {
+      display:grid; grid-template-columns:1fr 44px 1fr;
+      gap:.75rem; align-items:center;
+    }
+    .trade-side {
+      background:var(--panel2); border:1px solid var(--border);
+      border-radius:12px; padding:.75rem;
+    }
+    .trade-side-title {
+      color:var(--muted); font-size:.72rem; text-transform:uppercase;
+      margin-bottom:.4rem;
+    }
+    .trade-asset {
+      display:flex; justify-content:space-between; gap:.6rem;
+      padding:.34rem 0; border-bottom:1px solid rgba(255,255,255,.05);
+      font-size:.8rem;
+    }
+    .trade-arrow { text-align:center; color:var(--orange); font-size:1.4rem; }
+    .fit-badge {
+      padding:.22rem .55rem; border-radius:999px;
+      background:#123322; color:#86efac;
+      font-size:.72rem; font-weight:900;
+    }
+    .partner-row {
+      display:grid; grid-template-columns:1.25fr .5fr .7fr .6fr 1.35fr;
+      gap:.5rem; align-items:center; padding:.55rem .65rem;
+      background:var(--panel); border-bottom:1px solid var(--border);
+      font-size:.78rem;
+    }
     .power-segment {
       display:flex;
       align-items:center;
@@ -1051,6 +1088,277 @@ def render_rankings(players: pd.DataFrame) -> None:
     )
 
 
+
+def positional_profile(teams: pd.DataFrame, team: str) -> dict[str, int]:
+    row = teams[teams["Team"] == team].iloc[0]
+    return {
+        "QB": int(row["QB_Rank"]),
+        "RB": int(row["RB_Rank"]),
+        "WR": int(row["WR_Rank"]),
+        "TE": int(row["TE_Rank"]),
+        "PICKS": int(row["Pick_Rank"]),
+    }
+
+
+def trade_partner_scores(
+    teams: pd.DataFrame,
+    my_team: str,
+) -> pd.DataFrame:
+    my_profile = positional_profile(teams, my_team)
+    my_strengths = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p])[:2]
+    my_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p], reverse=True)[:2]
+
+    rows = []
+    for _, row in teams.iterrows():
+        team = row["Team"]
+        if team == my_team:
+            continue
+
+        profile = positional_profile(teams, team)
+        their_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: profile[p], reverse=True)[:2]
+        their_strengths = sorted(["QB", "RB", "WR", "TE"], key=lambda p: profile[p])[:2]
+
+        reciprocal = (
+            len(set(my_strengths) & set(their_needs))
+            + len(set(my_needs) & set(their_strengths))
+        )
+        pick_flex = max(0, 13 - int(row["Pick_Rank"]))
+        score = min(
+            99,
+            reciprocal * 24
+            + pick_flex * 2
+            + sum(max(0, profile[p] - 6) for p in my_strengths)
+            + sum(max(0, 7 - profile[p]) for p in my_needs)
+        )
+
+        rows.append(
+            {
+                "Team": team,
+                "Fit Score": int(score),
+                "Window": row["Window"],
+                "Needs": ", ".join(their_needs),
+                "Strengths": ", ".join(their_strengths),
+                "Pick Rank": int(row["Pick_Rank"]),
+                "Overall Rank": int(row["Overall_Rank"]),
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values(
+        ["Fit Score", "Overall Rank"],
+        ascending=[False, True],
+    )
+
+
+def player_assets(
+    players: pd.DataFrame,
+    team: str,
+    positions: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    owned = players[players["Team"] == team].copy()
+    if positions:
+        owned = owned[owned["Position"].isin(positions)]
+    owned = owned.sort_values("Value", ascending=False)
+    return [
+        {"label": row["Player"], "value": int(row["Value"]), "type": "player", "position": row["Position"]}
+        for _, row in owned.iterrows()
+        if int(row["Value"]) > 0
+    ]
+
+
+def pick_assets(picks: pd.DataFrame, team: str) -> list[dict[str, Any]]:
+    owned = picks[picks["Current Owner"] == team].sort_values(["Season", "Round"])
+    result = []
+    for _, row in owned.iterrows():
+        label = f'{int(row["Season"])} R{int(row["Round"])}'
+        if row["Traded"]:
+            label += f' ({str(row["Original Team"])[:10]})'
+        result.append({"label": label, "value": int(row["Value"]), "type": "pick"})
+    return result
+
+
+def closest_package(
+    assets: list[dict[str, Any]],
+    target_value: int,
+    max_assets: int = 2,
+) -> list[dict[str, Any]]:
+    pool = assets[:18]
+    if not pool:
+        return []
+
+    best = [pool[0]]
+    best_gap = abs(pool[0]["value"] - target_value)
+
+    for asset in pool:
+        gap = abs(asset["value"] - target_value)
+        if gap < best_gap:
+            best, best_gap = [asset], gap
+
+    if max_assets >= 2:
+        for i, first in enumerate(pool):
+            for second in pool[i + 1:]:
+                gap = abs(first["value"] + second["value"] - target_value)
+                if gap < best_gap:
+                    best, best_gap = [first, second], gap
+    return best
+
+
+def build_trade_scenarios(
+    teams: pd.DataFrame,
+    players: pd.DataFrame,
+    picks: pd.DataFrame,
+    my_team: str,
+    partner: str,
+) -> list[dict[str, Any]]:
+    mine = positional_profile(teams, my_team)
+    theirs = positional_profile(teams, partner)
+
+    my_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: mine[p], reverse=True)
+    their_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: theirs[p], reverse=True)
+
+    target_positions = [p for p in my_needs if theirs[p] <= 6] or my_needs[:2]
+    outgoing_positions = [p for p in their_needs if mine[p] <= 6] or sorted(
+        ["QB", "RB", "WR", "TE"], key=lambda p: mine[p]
+    )[:2]
+
+    targets = player_assets(players, partner, target_positions)
+    outgoing_players = player_assets(players, my_team, outgoing_positions)
+    my_picks = pick_assets(picks, my_team)
+    their_picks = pick_assets(picks, partner)
+
+    scenarios = []
+
+    if targets:
+        target = targets[0]
+        package = closest_package(outgoing_players + my_picks, target["value"])
+        if package:
+            scenarios.append({
+                "title": f"Address {target.get('position', 'roster')} need",
+                "give": package,
+                "receive": [target],
+                "rationale": (
+                    f"{partner} is relatively strong at {target.get('position', 'this position')} "
+                    "while your roster ranks lower there. The outgoing package leans on a stronger "
+                    "room and may use draft capital to balance value."
+                ),
+            })
+
+    if their_picks and outgoing_players:
+        target_pick = their_picks[0]
+        package = closest_package(outgoing_players, target_pick["value"])
+        scenarios.append({
+            "title": "Convert roster surplus into draft capital",
+            "give": package,
+            "receive": [target_pick],
+            "rationale": (
+                f"{partner} owns useful draft capital and has positional needs that may overlap "
+                "with your stronger rooms. This shifts value toward your future build."
+            ),
+        })
+
+    if len(targets) > 1 and my_picks:
+        target = targets[1]
+        package = closest_package(my_picks + outgoing_players, target["value"])
+        scenarios.append({
+            "title": "Use draft capital to tier up",
+            "give": package,
+            "receive": [target],
+            "rationale": (
+                "This consolidates picks and/or a secondary player into a more valuable core asset. "
+                "It fits an elite-talent strategy but should preserve your most important future first."
+            ),
+        })
+
+    return scenarios[:3]
+
+
+def assets_html(assets: list[dict[str, Any]]) -> str:
+    return "".join(
+        f'<div class="trade-asset"><span>{clean(a["label"])}</span><span>{int(a["value"]):,}</span></div>'
+        for a in assets
+    ) or '<div class="trade-asset"><span>No assets</span><span>—</span></div>'
+
+
+def render_trade_intelligence(
+    teams: pd.DataFrame,
+    players: pd.DataFrame,
+    picks: pd.DataFrame,
+) -> None:
+    render_brand("Trade Intelligence", "Roster-aware partners and trade scenarios")
+
+    team_names = teams["Team"].tolist()
+    default_team = find_my_team(team_names) or team_names[0]
+    team = st.selectbox(
+        "Analyze franchise",
+        team_names,
+        index=team_names.index(default_team),
+    )
+
+    profile = positional_profile(teams, team)
+    strengths = sorted(["QB", "RB", "WR", "TE"], key=lambda p: profile[p])[:2]
+    needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: profile[p], reverse=True)[:2]
+
+    render_html(
+        f'<div class="gm-card"><b>{clean(team)}</b> is strongest at '
+        f'<b>{clean(" and ".join(strengths))}</b> and has the clearest needs at '
+        f'<b>{clean(" and ".join(needs))}</b>. Partner fit uses positional rankings, '
+        'competitive window and owned draft capital.</div>'
+    )
+
+    partners = trade_partner_scores(teams, team)
+
+    render_html(
+        '<div class="partner-row"><b>Partner</b><b>Fit</b><b>Window</b>'
+        '<b>Picks</b><b>Needs / Strengths</b></div>'
+        + "".join(
+            f'<div class="partner-row"><span><b>{clean(r["Team"])}</b></span>'
+            f'<span>{int(r["Fit Score"])}</span><span>{clean(r["Window"])}</span>'
+            f'<span>#{int(r["Pick Rank"])}</span>'
+            f'<span>{clean(r["Needs"])} / {clean(r["Strengths"])}</span></div>'
+            for _, r in partners.head(8).iterrows()
+        )
+    )
+
+    st.markdown("### Suggested Trade Scenarios")
+    partner = st.selectbox(
+        "Generate scenarios with",
+        partners["Team"].head(8).tolist(),
+    )
+
+    scenarios = build_trade_scenarios(teams, players, picks, team, partner)
+    if not scenarios:
+        st.info("No reasonable scenarios were generated from the current values.")
+        return
+
+    for scenario in scenarios:
+        give_value = sum(a["value"] for a in scenario["give"])
+        receive_value = sum(a["value"] for a in scenario["receive"])
+        match = max(
+            0,
+            100 - int(abs(receive_value - give_value) / max(give_value, receive_value, 1) * 100),
+        )
+
+        render_html(
+            f'<div class="trade-card">'
+            f'<div class="trade-card-top"><div><b>{clean(scenario["title"])}</b>'
+            f'<div class="small-muted">{clean(partner)}</div></div>'
+            f'<span class="fit-badge">{match}% value match</span></div>'
+            f'<div class="trade-grid"><div class="trade-side">'
+            f'<div class="trade-side-title">{clean(team)} sends</div>'
+            f'{assets_html(scenario["give"])}'
+            f'<div class="trade-asset"><b>Total</b><b>{give_value:,}</b></div></div>'
+            f'<div class="trade-arrow">⇄</div>'
+            f'<div class="trade-side"><div class="trade-side-title">{clean(team)} receives</div>'
+            f'{assets_html(scenario["receive"])}'
+            f'<div class="trade-asset"><b>Total</b><b>{receive_value:,}</b></div></div></div>'
+            f'<div class="trade-rationale">{clean(scenario["rationale"])}</div></div>'
+        )
+
+    st.caption(
+        "These are heuristic starting points, not predictions of acceptance. "
+        "They use FantasyCalc values, positional rankings, team windows and Sleeper pick ownership."
+    )
+
+
 def render_trade_calculator(players: pd.DataFrame, picks: pd.DataFrame, teams: pd.DataFrame) -> None:
     render_brand("Trade Centre", "Build and compare trade packages")
     st.caption("Rough-draft calculator using FantasyCalc player values and estimated draft-pick values.")
@@ -1146,7 +1454,7 @@ def main() -> None:
     elif page == "Rankings":
         render_rankings(players)
     elif page == "Trade Centre":
-        render_trade_calculator(players, picks, teams)
+        render_trade_intelligence(teams, players, picks)
     else:
         render_draft(picks, teams)
 
