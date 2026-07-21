@@ -27,8 +27,18 @@ st.set_page_config(
 
 
 def render_html(markup: str) -> None:
-    """Render generated HTML without Markdown treating indentation as code."""
-    st.markdown(textwrap.dedent(markup).strip(), unsafe_allow_html=True)
+    """Render generated HTML as one continuous block.
+
+    Markdown interprets indented lines and blank-separated fragments as code
+    blocks. Flattening the generated markup prevents player and summary cards
+    from appearing as raw HTML.
+    """
+    flattened = "".join(
+        line.strip()
+        for line in textwrap.dedent(markup).splitlines()
+        if line.strip()
+    )
+    st.markdown(flattened, unsafe_allow_html=True)
 
 
 st.markdown(
