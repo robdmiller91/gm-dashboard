@@ -411,6 +411,16 @@ st.markdown(
     .team-gm-line {
       margin-top:.75rem; color:var(--muted); font-size:.78rem;
     }
+    .power-segment {
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      min-width:28px;
+      color:#071018;
+      font-size:.72rem;
+      font-weight:950;
+      text-shadow:0 1px 0 rgba(255,255,255,.18);
+    }
 
     @media (max-width: 1100px) {
       .summary-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
@@ -973,11 +983,11 @@ def render_power_rankings(
                   <div class="franchise-rank">{int(row["Overall_Rank"])}</div>
                   <div class="franchise-name">{clean(team)}</div>
                   <div class="power-bar">
-                    <div class="seg-qb" style="width:{qb_w/total*100:.1f}%"></div>
-                    <div class="seg-rb" style="width:{rb_w/total*100:.1f}%"></div>
-                    <div class="seg-wr" style="width:{wr_w/total*100:.1f}%"></div>
-                    <div class="seg-te" style="width:{te_w/total*100:.1f}%"></div>
-                    <div class="seg-pick" style="width:{pk_w/total*100:.1f}%"></div>
+                    <div class="seg-qb power-segment" style="width:{qb_w/total*100:.1f}%">{int(row["QB_Rank"])}</div>
+                    <div class="seg-rb power-segment" style="width:{rb_w/total*100:.1f}%">{int(row["RB_Rank"])}</div>
+                    <div class="seg-wr power-segment" style="width:{wr_w/total*100:.1f}%">{int(row["WR_Rank"])}</div>
+                    <div class="seg-te power-segment" style="width:{te_w/total*100:.1f}%">{int(row["TE_Rank"])}</div>
+                    <div class="seg-pick power-segment" style="width:{pk_w/total*100:.1f}%">{int(row["Pick_Rank"])}</div>
                   </div>
                   <div class="franchise-status">{clean(row["Window"])}</div>
                 </div>
