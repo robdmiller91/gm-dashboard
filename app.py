@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import html
 import time
 from typing import Any
 
@@ -27,113 +28,285 @@ st.markdown(
     """
     <style>
     :root {
-        --bg: #0f0f12;
-        --panel: #17171c;
-        --panel-2: #1d1d23;
-        --border: #2b2b34;
-        --muted: #9c9ca7;
-        --text: #f4f4f5;
-        --orange: #ff9f1c;
-        --qb: #1fd1b0;
-        --rb: #1aa7ec;
-        --wr: #ff3b77;
-        --te: #cf3cff;
-        --pick: #ffb000;
+      --bg:#0a0d12;
+      --sidebar:#10141b;
+      --panel:#151a22;
+      --panel2:#1b222d;
+      --border:#283242;
+      --text:#f8fafc;
+      --muted:#98a2b3;
+      --orange:#f59e0b;
+      --qb:#19c7a3;
+      --rb:#169bd5;
+      --wr:#ff3d73;
+      --te:#d837f2;
+      --pick:#ffb000;
+      --green:#22c55e;
+      --red:#ef4444;
+      --blue:#3b82f6;
     }
 
-    .stApp { background: var(--bg); color: var(--text); }
-    .block-container { padding-top: 1rem; padding-bottom: 2rem; max-width: 1800px; }
-    [data-testid="stSidebar"] { background: #141419; border-right: 1px solid var(--border); }
-    [data-testid="stSidebar"] .block-container { padding-top: 1rem; }
-
-    .topbar {
-        display:flex; align-items:center; justify-content:space-between;
-        margin-bottom: 1rem;
+    .stApp { background:var(--bg); color:var(--text); }
+    [data-testid="stSidebar"] {
+      background:var(--sidebar);
+      border-right:1px solid var(--border);
+    }
+    .block-container {
+      max-width:1800px;
+      padding-top:1rem;
+      padding-bottom:2rem;
     }
     .brand {
-        display:flex; align-items:center; gap:.8rem;
+      display:flex; align-items:center; gap:.85rem; margin-bottom:1rem;
     }
-    .brand-mark {
-        width:42px; height:42px; border-radius:10px;
-        background:linear-gradient(135deg,#fff 0 35%,#ff9f1c 35% 65%,#111 65%);
-        border:1px solid var(--border);
+    .brand-badge {
+      width:44px; height:44px; border-radius:12px;
+      display:grid; place-items:center;
+      background:linear-gradient(135deg,#f8fafc 0 34%,var(--orange) 34% 68%,#111827 68%);
+      border:1px solid var(--border);
+      font-weight:900; color:#111827;
     }
-    .brand h1 { margin:0; font-size:1.75rem; }
-    .brand p { margin:.1rem 0 0; color:var(--muted); }
+    .brand h1 { margin:0; font-size:1.65rem; }
+    .brand p { margin:.15rem 0 0; color:var(--muted); font-size:.9rem; }
 
     .panel {
-        background:var(--panel); border:1px solid var(--border);
-        border-radius:16px; padding:1rem; margin-bottom:1rem;
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:18px;
+      padding:1rem;
+      margin-bottom:1rem;
     }
-    .metric-card {
-        background:var(--panel); border:1px solid var(--border);
-        border-radius:14px; padding:1rem;
+    .league-header {
+      display:flex; align-items:center; gap:.8rem;
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:16px;
+      padding:.9rem 1rem;
+      margin-bottom:1rem;
     }
-    .metric-label { color:var(--muted); font-size:.82rem; }
-    .metric-value { font-size:1.65rem; font-weight:800; margin-top:.25rem; }
-    .metric-sub { font-size:.8rem; color:var(--muted); margin-top:.2rem; }
+    .league-avatar {
+      width:36px; height:36px; border-radius:10px;
+      display:grid; place-items:center; background:#1fc7b5; color:#082f2f; font-weight:900;
+    }
+    .league-title { font-weight:800; font-size:1.05rem; }
+    .league-sub { color:var(--muted); font-size:.82rem; }
+    .window {
+      margin-left:auto;
+      padding:.25rem .65rem;
+      border-radius:999px;
+      background:#2d2a16;
+      color:#fde68a;
+      font-size:.78rem;
+      font-weight:800;
+    }
+
+    .summary-grid {
+      display:grid;
+      grid-template-columns:repeat(5,minmax(0,1fr));
+      gap:.75rem;
+      margin-bottom:1rem;
+    }
+    .summary-card {
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:14px;
+      padding:.9rem;
+    }
+    .summary-label { color:var(--muted); font-size:.78rem; }
+    .summary-value { font-size:1.45rem; font-weight:900; margin-top:.2rem; }
+    .summary-note { color:var(--muted); font-size:.75rem; margin-top:.15rem; }
+
+    .roster-strip {
+      display:flex;
+      overflow-x:auto;
+      gap:.65rem;
+      padding:.15rem 0 .75rem;
+      scrollbar-width:thin;
+    }
+    .player-card {
+      min-width:126px;
+      max-width:126px;
+      background:var(--panel2);
+      border:1px solid var(--border);
+      border-radius:15px;
+      overflow:hidden;
+      position:relative;
+    }
+    .player-status {
+      text-align:center;
+      padding:.25rem;
+      font-size:.7rem;
+      font-weight:800;
+      letter-spacing:.02em;
+    }
+    .starter { background:#0d2b17; color:#4ade80; }
+    .bench { background:#2b2811; color:#fde047; }
+    .ir { background:#321a1a; color:#fca5a5; }
+    .taxi { background:#1d2637; color:#93c5fd; }
+    .player-photo {
+      height:105px;
+      display:flex;
+      align-items:flex-end;
+      justify-content:center;
+      background:linear-gradient(180deg,#202a39,#111827);
+      overflow:hidden;
+    }
+    .player-photo img {
+      width:100%;
+      height:100%;
+      object-fit:contain;
+      object-position:center bottom;
+    }
+    .player-card-body { padding:.55rem; }
+    .player-card-name {
+      font-size:.82rem;
+      font-weight:800;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .player-card-meta {
+      display:flex;
+      justify-content:space-between;
+      margin-top:.35rem;
+      font-size:.72rem;
+    }
+    .pos-pill {
+      padding:.15rem .35rem;
+      border-radius:6px;
+      color:#081018;
+      font-weight:900;
+    }
+    .qb-bg{background:var(--qb)}
+    .rb-bg{background:var(--rb)}
+    .wr-bg{background:var(--wr)}
+    .te-bg{background:var(--te)}
+    .idp-bg{background:#94a3b8}
+    .rank-chip {
+      background:#0b0f15;
+      border:1px solid var(--border);
+      border-radius:7px;
+      padding:.12rem .3rem;
+      color:#fff;
+      font-weight:800;
+    }
 
     .position-header {
-        display:flex; align-items:center; justify-content:space-between;
-        padding:.65rem .75rem; border-radius:10px 10px 0 0;
-        font-weight:800; color:#0b0b0e;
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      color:#081018;
+      font-weight:900;
+      padding:.55rem .7rem;
+      border-radius:10px 10px 0 0;
     }
-    .qb { background:var(--qb); }
-    .rb { background:var(--rb); }
-    .wr { background:var(--wr); }
-    .te { background:var(--te); }
-    .pick { background:var(--pick); }
+    .position-row {
+      display:grid;
+      grid-template-columns:32px 1fr auto auto;
+      gap:.45rem;
+      align-items:center;
+      background:var(--panel2);
+      border-left:1px solid var(--border);
+      border-right:1px solid var(--border);
+      border-bottom:1px solid var(--border);
+      padding:.52rem .55rem;
+      font-size:.79rem;
+    }
+    .position-row:last-child { border-radius:0 0 10px 10px; }
+    .mini-photo {
+      width:28px; height:28px; border-radius:50%;
+      object-fit:cover; background:#111827;
+    }
+    .name-clip {
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .value { color:#d7dce3; font-variant-numeric:tabular-nums; }
+    .small-rank {
+      min-width:30px;
+      text-align:center;
+      border-radius:6px;
+      padding:.18rem .3rem;
+      background:#0c1118;
+      font-weight:900;
+    }
 
-    .player-row, .pick-row {
-        display:grid; grid-template-columns: 1fr auto auto;
-        gap:.5rem; align-items:center;
-        padding:.58rem .7rem;
-        border-left:1px solid var(--border);
-        border-right:1px solid var(--border);
-        border-bottom:1px solid var(--border);
-        background:var(--panel-2);
-        font-size:.9rem;
+    .power-row {
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:14px;
+      padding:.8rem;
+      margin-bottom:.65rem;
     }
-    .player-row:last-child, .pick-row:last-child { border-radius:0 0 10px 10px; }
-    .player-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .rank-box {
-        min-width:34px; text-align:center; padding:.2rem .35rem;
-        border-radius:7px; background:#0e0e12; color:#f5f5f5; font-weight:700;
+    .power-top {
+      display:grid;
+      grid-template-columns:38px 170px 1fr auto;
+      gap:.65rem;
+      align-items:center;
     }
-    .value-box { color:#d5d5dc; font-variant-numeric:tabular-nums; }
+    .team-rank {
+      width:34px; height:34px; border-radius:10px;
+      display:grid; place-items:center; background:#0d1219;
+      border:1px solid var(--border); font-weight:900;
+    }
+    .team-name { font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .power-bar {
+      height:16px; border-radius:999px; overflow:hidden;
+      display:flex; background:#0d1219;
+      border:1px solid var(--border);
+    }
+    .seg-qb{background:var(--qb)}
+    .seg-rb{background:var(--rb)}
+    .seg-wr{background:var(--wr)}
+    .seg-te{background:var(--te)}
+    .seg-pick{background:var(--pick)}
+    .status-tag {
+      padding:.22rem .5rem;
+      border-radius:999px;
+      font-size:.72rem;
+      font-weight:800;
+      background:#1c2733;
+      color:#bfdbfe;
+    }
+    .power-meta {
+      margin-top:.5rem;
+      color:var(--muted);
+      font-size:.76rem;
+      display:flex; gap:.8rem; flex-wrap:wrap;
+    }
 
-    .league-strip {
-        display:flex; align-items:center; gap:.65rem;
-        padding:.75rem 1rem; background:var(--panel);
-        border:1px solid var(--border); border-radius:14px; margin-bottom:1rem;
+    .section-title {
+      display:flex; align-items:center; justify-content:space-between;
+      margin:.2rem 0 .7rem;
     }
-    .league-dot { width:12px; height:12px; border-radius:50%; background:#4be0d0; }
-    .window-tag {
-        margin-left:auto; background:#2b2b21; color:#e6d75f;
-        padding:.2rem .55rem; border-radius:999px; font-size:.76rem; font-weight:700;
-    }
+    .section-title h3 { margin:0; }
 
-    .pill {
-        display:inline-block; border:1px solid var(--border); background:var(--panel-2);
-        padding:.35rem .7rem; border-radius:999px; margin-right:.35rem; color:#d7d7dd;
-        font-size:.82rem;
+    .gm-card {
+      background:linear-gradient(135deg,rgba(245,158,11,.12),rgba(59,130,246,.08));
+      border:1px solid var(--border);
+      border-radius:16px;
+      padding:1rem;
+      margin-bottom:1rem;
     }
 
     [data-testid="stMetric"] {
-        background:var(--panel); border:1px solid var(--border);
-        border-radius:14px; padding:12px;
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:14px;
+      padding:12px;
     }
-
     div[data-testid="stDataFrame"] {
-        border:1px solid var(--border); border-radius:12px; overflow:hidden;
+      border:1px solid var(--border);
+      border-radius:12px;
+      overflow:hidden;
     }
 
-    .gm-note {
-        padding:1rem; border-radius:14px; border:1px solid var(--border);
-        background:linear-gradient(135deg,rgba(255,159,28,.12),rgba(78,205,196,.08));
+    @media (max-width: 1100px) {
+      .summary-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .power-top { grid-template-columns:34px 130px 1fr; }
+      .status-tag { display:none; }
     }
-
-    .small-muted { color:var(--muted); font-size:.82rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -149,7 +322,7 @@ def get_json(url: str, timeout: int = 30) -> Any:
         response = requests.get(
             url,
             timeout=timeout,
-            headers={"User-Agent": "Fantasy-Football-Front-Office/0.3"},
+            headers={"User-Agent": "Fantasy-Football-Front-Office/Milestone-2"},
         )
         response.raise_for_status()
         return response.json()
@@ -174,11 +347,11 @@ def load_sleeper_bundle(league_id: str) -> dict[str, Any]:
 def load_fantasycalc() -> list[dict[str, Any]]:
     data = get_json(FANTASYCALC_URL)
     if not isinstance(data, list):
-        raise DataError("FantasyCalc returned an unexpected response shape.")
+        raise DataError("FantasyCalc returned an unexpected response.")
     return data
 
 
-def owner_name(user: dict[str, Any]) -> str:
+def team_name(user: dict[str, Any]) -> str:
     metadata = user.get("metadata") or {}
     return (
         metadata.get("team_name")
@@ -199,16 +372,25 @@ def normalise_fc(row: dict[str, Any]) -> dict[str, Any]:
     )
     return {
         "sleeper_id": str(sleeper_id),
-        "name": player.get("name") or row.get("name") or "Unknown",
         "value": int(row.get("value") or 0),
         "rank": row.get("overallRank") or row.get("rank"),
         "position_rank": row.get("positionRank"),
-        "trend": row.get("trend30Day") or row.get("trend30") or 0,
+        "trend": int(row.get("trend30Day") or row.get("trend30") or 0),
         "age": player.get("age") or row.get("age"),
     }
 
 
-def build_player_table(bundle: dict[str, Any], fc_rows: list[dict[str, Any]]) -> pd.DataFrame:
+def player_image_url(player: dict[str, Any]) -> str:
+    espn_id = player.get("espn_id")
+    if espn_id:
+        return f"https://a.espncdn.com/i/headshots/nfl/players/full/{espn_id}.png"
+    sleeper_id = player.get("player_id")
+    if sleeper_id:
+        return f"https://sleepercdn.com/content/nfl/players/{sleeper_id}.jpg"
+    return "https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png"
+
+
+def build_players(bundle: dict[str, Any], fc_rows: list[dict[str, Any]]) -> pd.DataFrame:
     users = {str(u.get("user_id")): u for u in bundle["users"]}
     fc_by_id = {
         row["sleeper_id"]: row
@@ -216,22 +398,22 @@ def build_player_table(bundle: dict[str, Any], fc_rows: list[dict[str, Any]]) ->
         if row["sleeper_id"]
     }
 
-    records: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for roster in bundle["rosters"]:
-        user = users.get(str(roster.get("owner_id")), {})
-        team = owner_name(user)
-        starters = {str(x) for x in (roster.get("starters") or [])}
-        reserve = {str(x) for x in (roster.get("reserve") or [])}
-        taxi = {str(x) for x in (roster.get("taxi") or [])}
+        owner = users.get(str(roster.get("owner_id")), {})
+        roster_team = team_name(owner)
+        starters = {str(x) for x in roster.get("starters") or []}
+        reserve = {str(x) for x in roster.get("reserve") or []}
+        taxi = {str(x) for x in roster.get("taxi") or []}
 
         for raw_id in roster.get("players") or []:
             pid = str(raw_id)
-            sleeper_player = bundle["players"].get(pid, {}) or {}
+            p = bundle["players"].get(pid, {}) or {}
+            p["player_id"] = pid
             fc = fc_by_id.get(pid, {})
             name = (
-                sleeper_player.get("full_name")
-                or " ".join(filter(None, [sleeper_player.get("first_name"), sleeper_player.get("last_name")]))
-                or fc.get("name")
+                p.get("full_name")
+                or " ".join(filter(None, [p.get("first_name"), p.get("last_name")]))
                 or pid
             )
             status = "Starter" if pid in starters else "Bench"
@@ -240,38 +422,38 @@ def build_player_table(bundle: dict[str, Any], fc_rows: list[dict[str, Any]]) ->
             elif pid in taxi:
                 status = "Taxi"
 
-            records.append(
+            rows.append(
                 {
-                    "Team": team,
+                    "Team": roster_team,
                     "Roster ID": int(roster["roster_id"]),
                     "Player": name,
-                    "Position": sleeper_player.get("position") or "NA",
-                    "NFL Team": sleeper_player.get("team") or "FA",
-                    "Age": sleeper_player.get("age") or fc.get("age"),
+                    "Position": p.get("position") or "NA",
+                    "NFL Team": p.get("team") or "FA",
+                    "Age": p.get("age") or fc.get("age"),
                     "Status": status,
-                    "FantasyCalc Value": int(fc.get("value") or 0),
+                    "Value": int(fc.get("value") or 0),
                     "Overall Rank": fc.get("rank"),
                     "Position Rank": fc.get("position_rank"),
-                    "30-Day Trend": int(fc.get("trend") or 0),
+                    "Trend": fc.get("trend") or 0,
                     "Sleeper ID": pid,
+                    "Image": player_image_url(p),
                 }
             )
-    return pd.DataFrame(records)
+    return pd.DataFrame(rows)
 
 
-def build_pick_inventory(bundle: dict[str, Any]) -> pd.DataFrame:
+def build_picks(bundle: dict[str, Any]) -> pd.DataFrame:
     league = bundle["league"]
-    users = {str(u.get("user_id")): owner_name(u) for u in bundle["users"]}
+    users = {str(u.get("user_id")): team_name(u) for u in bundle["users"]}
     roster_to_team = {
         int(r["roster_id"]): users.get(str(r.get("owner_id")), f"Roster {r['roster_id']}")
         for r in bundle["rosters"]
     }
-
     current_season = int(league.get("season") or 2026)
     rounds = int((league.get("settings") or {}).get("draft_rounds") or 3)
     seasons = [current_season, current_season + 1, current_season + 2]
-    ownership: dict[tuple[int, int, int], int] = {}
 
+    ownership: dict[tuple[int, int, int], int] = {}
     for season in seasons:
         for original in roster_to_team:
             for rnd in range(1, rounds + 1):
@@ -285,74 +467,72 @@ def build_pick_inventory(bundle: dict[str, Any]) -> pd.DataFrame:
         except (KeyError, TypeError, ValueError):
             continue
 
-    year_factor = {current_season: 1.00, current_season + 1: 0.88, current_season + 2: 0.76}
+    year_factor = {current_season: 1.0, current_season + 1: 0.88, current_season + 2: 0.76}
     round_base = {1: 4300, 2: 1800, 3: 800, 4: 350, 5: 150}
     rows = []
-    for (season, rnd, original), current_owner in ownership.items():
+    for (season, rnd, original), owner in ownership.items():
         rows.append(
             {
                 "Season": season,
                 "Round": rnd,
                 "Original Team": roster_to_team.get(original, str(original)),
-                "Current Owner": roster_to_team.get(current_owner, str(current_owner)),
-                "Estimated Value": round(round_base.get(rnd, 75) * year_factor.get(season, .70)),
-                "Traded": current_owner != original,
+                "Current Owner": roster_to_team.get(owner, str(owner)),
+                "Value": round(round_base.get(rnd, 75) * year_factor.get(season, .70)),
+                "Traded": owner != original,
             }
         )
     return pd.DataFrame(rows)
 
 
-def build_team_table(players: pd.DataFrame, picks: pd.DataFrame) -> pd.DataFrame:
-    position_values = players.groupby(["Team", "Position"])["FantasyCalc Value"].sum().unstack(fill_value=0)
-    team_df = (
+def build_teams(players: pd.DataFrame, picks: pd.DataFrame) -> pd.DataFrame:
+    pos = players.groupby(["Team", "Position"])["Value"].sum().unstack(fill_value=0)
+    base = (
         players.groupby("Team", as_index=False)
         .agg(
-            Player_Value=("FantasyCalc Value", "sum"),
+            Player_Value=("Value", "sum"),
             Avg_Age=("Age", "mean"),
-            Trend_30d=("30-Day Trend", "sum"),
+            Trend=("Trend", "sum"),
             Player_Count=("Player", "count"),
         )
     )
     pick_values = (
-        picks.groupby("Current Owner", as_index=False)["Estimated Value"]
+        picks.groupby("Current Owner", as_index=False)["Value"]
         .sum()
-        .rename(columns={"Current Owner": "Team", "Estimated Value": "Pick_Value"})
+        .rename(columns={"Current Owner": "Team", "Value": "Pick_Value"})
     )
-    team_df = team_df.merge(pick_values, on="Team", how="left")
-    team_df["Pick_Value"] = team_df["Pick_Value"].fillna(0).astype(int)
-    team_df["Total_Value"] = team_df["Player_Value"] + team_df["Pick_Value"]
-    team_df["Avg_Age"] = team_df["Avg_Age"].round(1)
+    base = base.merge(pick_values, on="Team", how="left")
+    base["Pick_Value"] = base["Pick_Value"].fillna(0).astype(int)
+    base["Total_Value"] = base["Player_Value"] + base["Pick_Value"]
+    base["Avg_Age"] = base["Avg_Age"].round(1)
 
-    for pos in ["QB", "RB", "WR", "TE"]:
-        if pos not in position_values.columns:
-            position_values[pos] = 0
-    team_df = team_df.merge(position_values[["QB", "RB", "WR", "TE"]].reset_index(), on="Team", how="left")
+    for p in ["QB", "RB", "WR", "TE"]:
+        if p not in pos.columns:
+            pos[p] = 0
+    base = base.merge(pos[["QB", "RB", "WR", "TE"]].reset_index(), on="Team", how="left")
 
-    for pos in ["QB", "RB", "WR", "TE"]:
-        team_df[f"{pos}_Rank"] = team_df[pos].rank(ascending=False, method="min").astype(int)
+    for p in ["QB", "RB", "WR", "TE"]:
+        base[f"{p}_Rank"] = base[p].rank(ascending=False, method="min").astype(int)
+    base["Pick_Rank"] = base["Pick_Value"].rank(ascending=False, method="min").astype(int)
+    base["Overall_Rank"] = base["Total_Value"].rank(ascending=False, method="min").astype(int)
 
-    team_df["Overall_Rank"] = team_df["Total_Value"].rank(ascending=False, method="min").astype(int)
-    team_df["Player_Rank"] = team_df["Player_Value"].rank(ascending=False, method="min").astype(int)
-    team_df["Pick_Rank"] = team_df["Pick_Value"].rank(ascending=False, method="min").astype(int)
+    med_age = base["Avg_Age"].median()
+    hi = base["Player_Value"].quantile(.65)
+    lo = base["Player_Value"].quantile(.35)
+    pick_hi = base["Pick_Value"].quantile(.65)
 
-    median_age = team_df["Avg_Age"].median()
-    hi = team_df["Player_Value"].quantile(.65)
-    lo = team_df["Player_Value"].quantile(.35)
-    pick_hi = team_df["Pick_Value"].quantile(.65)
-
-    def window(row: pd.Series) -> str:
-        if row["Player_Value"] >= hi and row["Avg_Age"] <= median_age + .4:
+    def classify(row: pd.Series) -> str:
+        if row["Player_Value"] >= hi and row["Avg_Age"] <= med_age + .4:
             return "Contender"
         if row["Player_Value"] >= hi:
             return "Win-now"
         if row["Player_Value"] <= lo and row["Pick_Value"] >= pick_hi:
             return "Rebuilding"
-        if row["Avg_Age"] < median_age and row["Pick_Value"] >= team_df["Pick_Value"].median():
+        if row["Avg_Age"] < med_age and row["Pick_Value"] >= base["Pick_Value"].median():
             return "Ascending"
         return "Balanced"
 
-    team_df["Window"] = team_df.apply(window, axis=1)
-    return team_df.sort_values(["Overall_Rank", "Team"])
+    base["Window"] = base.apply(classify, axis=1)
+    return base.sort_values(["Overall_Rank", "Team"])
 
 
 def find_my_team(names: list[str]) -> str | None:
@@ -360,271 +540,242 @@ def find_my_team(names: list[str]) -> str | None:
     return exact or next((x for x in names if "7 toes" in x.casefold()), None)
 
 
-def fmt(value: float | int) -> str:
-    return f"{int(value):,}"
+def clean(value: Any) -> str:
+    return html.escape(str(value))
 
 
-def percentile_rank(team_df: pd.DataFrame, team: str, column: str) -> int:
-    value = float(team_df.loc[team_df["Team"] == team, column].iloc[0])
-    return int(round((team_df[column] <= value).mean() * 100))
+def status_class(status: str) -> str:
+    return status.lower().replace(" ", "-")
 
 
-def render_brand() -> None:
+def pos_class(pos: str) -> str:
+    pos = pos.upper()
+    return {
+        "QB": "qb-bg",
+        "RB": "rb-bg",
+        "WR": "wr-bg",
+        "TE": "te-bg",
+    }.get(pos, "idp-bg")
+
+
+def render_brand(title: str, subtitle: str) -> None:
     st.markdown(
-        """
-        <div class="topbar">
-            <div class="brand">
-                <div class="brand-mark"></div>
-                <div>
-                    <h1>Front Office</h1>
-                    <p>League portfolio and GM intelligence</p>
-                </div>
-            </div>
+        f"""
+        <div class="brand">
+          <div class="brand-badge">FO</div>
+          <div>
+            <h1>{clean(title)}</h1>
+            <p>{clean(subtitle)}</p>
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-def render_player_column(roster: pd.DataFrame, pos: str, css_class: str, team_rank: int) -> None:
-    data = roster[roster["Position"] == pos].sort_values("FantasyCalc Value", ascending=False).head(8)
+def render_player_card(row: pd.Series) -> str:
+    position_rank = "—" if pd.isna(row["Position Rank"]) else int(row["Position Rank"])
+    return f"""
+    <div class="player-card">
+      <div class="player-status {status_class(row["Status"])}">{clean(row["Status"])}</div>
+      <div class="player-photo">
+        <img src="{clean(row["Image"])}"
+             onerror="this.onerror=null;this.src='https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png';">
+      </div>
+      <div class="player-card-body">
+        <div class="player-card-name">{clean(row["Player"])}</div>
+        <div class="player-card-meta">
+          <span class="pos-pill {pos_class(row["Position"])}">{clean(row["Position"])}</span>
+          <span class="rank-chip">{position_rank}</span>
+        </div>
+      </div>
+    </div>
+    """
+
+
+def render_position_column(roster: pd.DataFrame, pos: str, rank: int, color_class: str) -> None:
     st.markdown(
-        f'<div class="position-header {css_class}"><span>{pos} Rank</span><span>{team_rank}</span></div>',
+        f'<div class="position-header {color_class}"><span>{pos} Rank</span><span>{rank}</span></div>',
         unsafe_allow_html=True,
     )
+    data = roster[roster["Position"] == pos].sort_values("Value", ascending=False).head(9)
     if data.empty:
-        st.markdown('<div class="player-row"><span class="player-name">No players</span><span></span><span></span></div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="position-row"><span></span><span>No players</span><span></span><span></span></div>',
+            unsafe_allow_html=True,
+        )
         return
     for _, row in data.iterrows():
-        p_rank = row["Position Rank"]
-        p_rank_text = "—" if pd.isna(p_rank) else str(int(p_rank))
+        p_rank = "—" if pd.isna(row["Position Rank"]) else int(row["Position Rank"])
         st.markdown(
             f"""
-            <div class="player-row">
-                <span class="player-name">{row["Player"]}</span>
-                <span class="value-box">{int(row["FantasyCalc Value"])}</span>
-                <span class="rank-box">{p_rank_text}</span>
+            <div class="position-row">
+              <img class="mini-photo" src="{clean(row["Image"])}"
+                   onerror="this.onerror=null;this.src='https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png';">
+              <span class="name-clip">{clean(row["Player"])}</span>
+              <span class="value">{int(row["Value"])}</span>
+              <span class="small-rank">{p_rank}</span>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
 
-def render_pick_column(picks: pd.DataFrame, team: str, pick_rank: int) -> None:
-    data = picks[picks["Current Owner"] == team].sort_values(["Season", "Round"]).head(9)
+def render_pick_column(picks: pd.DataFrame, team: str, rank: int) -> None:
     st.markdown(
-        f'<div class="position-header pick"><span>PICKS</span><span>{pick_rank}</span></div>',
+        f'<div class="position-header pick"><span>PICKS</span><span>{rank}</span></div>',
         unsafe_allow_html=True,
     )
+    data = picks[picks["Current Owner"] == team].sort_values(["Season", "Round"]).head(10)
     for _, row in data.iterrows():
         label = f'{int(row["Season"])} R{int(row["Round"])}'
         if row["Traded"]:
-            label += f' ({row["Original Team"][:10]})'
+            label += f' ({str(row["Original Team"])[:9]})'
         st.markdown(
             f"""
-            <div class="pick-row">
-                <span class="player-name">{label}</span>
-                <span class="value-box">{int(row["Estimated Value"])}</span>
-                <span class="rank-box">↔</span>
+            <div class="position-row">
+              <span style="font-size:1.15rem">📋</span>
+              <span class="name-clip">{clean(label)}</span>
+              <span class="value">{int(row["Value"])}</span>
+              <span class="small-rank">↔</span>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
 
-def render_portfolio(team_df: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame, league_name: str) -> None:
-    render_brand()
-    my_team = find_my_team(team_df["Team"].tolist()) or team_df.iloc[0]["Team"]
-    row = team_df[team_df["Team"] == my_team].iloc[0]
-    roster = players[players["Team"] == my_team].copy()
+def render_summary_cards(row: pd.Series) -> None:
+    cards = [
+        ("Overall Rank", f'#{int(row["Overall_Rank"])}', "League-wide franchise rank"),
+        ("Player Value", f'{int(row["Player_Value"]):,}', "Current roster market value"),
+        ("Pick Value", f'{int(row["Pick_Value"]):,}', "Future draft capital"),
+        ("Average Age", f'{row["Avg_Age"]:.1f}', "Roster age profile"),
+        ("30-Day Trend", f'{int(row["Trend"]):+d}', "Recent market movement"),
+    ]
+    html_cards = "".join(
+        f"""
+        <div class="summary-card">
+          <div class="summary-label">{label}</div>
+          <div class="summary-value">{value}</div>
+          <div class="summary-note">{note}</div>
+        </div>
+        """
+        for label, value, note in cards
+    )
+    st.markdown(f'<div class="summary-grid">{html_cards}</div>', unsafe_allow_html=True)
+
+
+def render_team_review(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame, league_name: str) -> None:
+    render_brand("My Team", "Front-office view of your roster and league position")
+    my_team = find_my_team(teams["Team"].tolist()) or teams.iloc[0]["Team"]
+    selected = st.selectbox("League / Team", teams["Team"].tolist(), index=teams["Team"].tolist().index(my_team))
+    row = teams[teams["Team"] == selected].iloc[0]
+    roster = players[players["Team"] == selected].sort_values(["Status", "Value"], ascending=[True, False])
 
     st.markdown(
         f"""
-        <div class="league-strip">
-            <div class="league-dot"></div>
-            <strong>{league_name}</strong>
-            <span class="small-muted">View League →</span>
-            <span class="window-tag">{row["Window"]}</span>
+        <div class="league-header">
+          <div class="league-avatar">WW</div>
+          <div>
+            <div class="league-title">{clean(league_name)}</div>
+            <div class="league-sub">{clean(selected)}</div>
+          </div>
+          <div class="window">{clean(row["Window"])}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    left, right = st.columns([2.8, 1.15], gap="large")
-    with left:
-        cols = st.columns([1, 1, 1.25, 1, 1.1], gap="small")
-        with cols[0]:
-            render_player_column(roster, "QB", "qb", int(row["QB_Rank"]))
-        with cols[1]:
-            render_player_column(roster, "RB", "rb", int(row["RB_Rank"]))
-        with cols[2]:
-            render_player_column(roster, "WR", "wr", int(row["WR_Rank"]))
-        with cols[3]:
-            render_player_column(roster, "TE", "te", int(row["TE_Rank"]))
-        with cols[4]:
-            render_pick_column(picks, my_team, int(row["Pick_Rank"]))
+    render_summary_cards(row)
 
-        st.markdown("### GM Summary")
-        pos_ranks = {
-            "QB": int(row["QB_Rank"]),
-            "RB": int(row["RB_Rank"]),
-            "WR": int(row["WR_Rank"]),
-            "TE": int(row["TE_Rank"]),
-        }
-        strongest = min(pos_ranks, key=pos_ranks.get)
-        weakest = max(pos_ranks, key=pos_ranks.get)
-        st.markdown(
-            f"""
-            <div class="gm-note">
-                <b>{my_team}</b> profiles as <b>{row["Window"]}</b>.
-                The strongest room is <b>{strongest}</b> (#{pos_ranks[strongest]}),
-                while the clearest need is <b>{weakest}</b> (#{pos_ranks[weakest]}).
-                Overall franchise value ranks <b>#{int(row["Overall_Rank"])}</b> in the league.
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    st.markdown('<div class="section-title"><h3>Roster</h3><span style="color:#98a2b3">Scroll horizontally</span></div>', unsafe_allow_html=True)
+    cards = "".join(render_player_card(r) for _, r in roster.head(18).iterrows())
+    st.markdown(f'<div class="roster-strip">{cards}</div>', unsafe_allow_html=True)
 
-    with right:
-        avg_pct = round(
-            sum(percentile_rank(team_df, my_team, c) for c in ["QB", "RB", "WR", "TE", "Pick_Value"]) / 5
-        )
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-label">Avg. percentile</div>
-                <div class="metric-value">Top {100-avg_pct}%</div>
-                <div class="metric-sub">{row["Window"]}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    st.markdown('<div class="section-title"><h3>Roster Construction</h3></div>', unsafe_allow_html=True)
+    cols = st.columns([1, 1, 1.2, 1, 1.1], gap="small")
+    with cols[0]:
+        render_position_column(roster, "QB", int(row["QB_Rank"]), "qb-bg")
+    with cols[1]:
+        render_position_column(roster, "RB", int(row["RB_Rank"]), "rb-bg")
+    with cols[2]:
+        render_position_column(roster, "WR", int(row["WR_Rank"]), "wr-bg")
+    with cols[3]:
+        render_position_column(roster, "TE", int(row["TE_Rank"]), "te-bg")
+    with cols[4]:
+        render_pick_column(picks, selected, int(row["Pick_Rank"]))
 
-        st.markdown("### Positional percentiles")
-        chart = pd.DataFrame(
-            {
-                "Category": ["QB", "RB", "WR", "TE", "Picks"],
-                "Percentile": [
-                    percentile_rank(team_df, my_team, "QB"),
-                    percentile_rank(team_df, my_team, "RB"),
-                    percentile_rank(team_df, my_team, "WR"),
-                    percentile_rank(team_df, my_team, "TE"),
-                    percentile_rank(team_df, my_team, "Pick_Value"),
-                ],
-            }
-        ).set_index("Category")
-        st.bar_chart(chart)
-
-        st.markdown("### Portfolio exposure")
-        top = roster.sort_values("FantasyCalc Value", ascending=False).head(12)
-        st.dataframe(
-            top[["Player", "Position", "FantasyCalc Value"]],
-            hide_index=True,
-            use_container_width=True,
-        )
-
-
-def render_league(team_df: pd.DataFrame) -> None:
-    render_brand()
-    st.subheader("League Power Board")
-    show = team_df.rename(
-        columns={
-            "Overall_Rank": "Rank",
-            "Total_Value": "Total",
-            "Player_Value": "Players",
-            "Pick_Value": "Picks",
-            "Avg_Age": "Avg Age",
-        }
-    )
-    st.dataframe(
-        show[["Rank", "Team", "Window", "Total", "Players", "Picks", "Avg Age", "QB_Rank", "RB_Rank", "WR_Rank", "TE_Rank"]],
-        hide_index=True,
-        use_container_width=True,
-    )
-
-
-def render_franchise_review(team_df: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame) -> None:
-    render_brand()
-    team = st.selectbox("Franchise", team_df["Team"].tolist())
-    row = team_df[team_df["Team"] == team].iloc[0]
-    roster = players[players["Team"] == team].copy()
-
-    st.markdown(f"## {team}")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Overall rank", f'#{int(row["Overall_Rank"])}')
-    c2.metric("Player value", fmt(row["Player_Value"]))
-    c3.metric("Pick value", fmt(row["Pick_Value"]))
-    c4.metric("Average age", f'{row["Avg_Age"]:.1f}')
-    c5.metric("Window", row["Window"])
-
-    cols = st.columns([1, 1, 1.25, 1, 1.1], gap="small")
-    with cols[0]: render_player_column(roster, "QB", "qb", int(row["QB_Rank"]))
-    with cols[1]: render_player_column(roster, "RB", "rb", int(row["RB_Rank"]))
-    with cols[2]: render_player_column(roster, "WR", "wr", int(row["WR_Rank"]))
-    with cols[3]: render_player_column(roster, "TE", "te", int(row["TE_Rank"]))
-    with cols[4]: render_pick_column(picks, team, int(row["Pick_Rank"]))
-
-
-def render_trade_lab(team_df: pd.DataFrame, players: pd.DataFrame) -> None:
-    render_brand()
-    st.subheader("Trade Lab")
-    my_team = find_my_team(team_df["Team"].tolist())
-    my_row = team_df[team_df["Team"] == my_team].iloc[0]
-
-    ranks = {"QB": my_row["QB_Rank"], "RB": my_row["RB_Rank"], "WR": my_row["WR_Rank"], "TE": my_row["TE_Rank"]}
-    needs = sorted(ranks, key=ranks.get, reverse=True)[:2]
-    strengths = sorted(ranks, key=ranks.get)[:2]
-
-    targets = players[
-        (players["Team"] != my_team)
-        & (players["Position"].isin(needs))
-        & (players["FantasyCalc Value"] >= 2500)
-    ].sort_values(["FantasyCalc Value", "30-Day Trend"], ascending=[False, False])
-
+    pos_ranks = {
+        "QB": int(row["QB_Rank"]),
+        "RB": int(row["RB_Rank"]),
+        "WR": int(row["WR_Rank"]),
+        "TE": int(row["TE_Rank"]),
+    }
+    strongest = min(pos_ranks, key=pos_ranks.get)
+    weakest = max(pos_ranks, key=pos_ranks.get)
     st.markdown(
-        f'<span class="pill">Needs: {" / ".join(needs)}</span>'
-        f'<span class="pill">Strengths: {" / ".join(strengths)}</span>',
+        f"""
+        <div class="gm-card">
+          <b>GM Review:</b> {clean(selected)} currently profiles as <b>{clean(row["Window"])}</b>.
+          The strongest room is <b>{strongest}</b> (#{pos_ranks[strongest]}), while the largest
+          positional gap is <b>{weakest}</b> (#{pos_ranks[weakest]}). The franchise ranks
+          <b>#{int(row["Overall_Rank"])}</b> overall when roster value and draft capital are combined.
+        </div>
+        """,
         unsafe_allow_html=True,
     )
-    st.dataframe(
-        targets[["Player", "Position", "Team", "Age", "FantasyCalc Value", "30-Day Trend"]].head(30),
-        hide_index=True,
-        use_container_width=True,
-    )
 
 
-def render_draft(picks: pd.DataFrame, team_df: pd.DataFrame) -> None:
-    render_brand()
-    st.subheader("Draft Capital")
-    owner = st.selectbox("Current owner", ["All teams"] + team_df["Team"].tolist())
-    view = picks.copy()
-    if owner != "All teams":
-        view = view[view["Current Owner"] == owner]
+def render_power_rankings(teams: pd.DataFrame) -> None:
+    render_brand("League Power Rankings", "Compare every franchise from a GM perspective")
+    total_max = max(float(teams["Total_Value"].max()), 1)
 
-    summary = (
-        view.groupby("Current Owner", as_index=False)
-        .agg(
-            Total_Picks=("Round", "count"),
-            Firsts=("Round", lambda x: int((x == 1).sum())),
-            Seconds=("Round", lambda x: int((x == 2).sum())),
-            Thirds=("Round", lambda x: int((x == 3).sum())),
-            Estimated_Value=("Estimated Value", "sum"),
+    for _, row in teams.iterrows():
+        qb_w = max(3, row["QB"] / total_max * 100)
+        rb_w = max(3, row["RB"] / total_max * 100)
+        wr_w = max(3, row["WR"] / total_max * 100)
+        te_w = max(3, row["TE"] / total_max * 100)
+        pk_w = max(3, row["Pick_Value"] / total_max * 100)
+        total = qb_w + rb_w + wr_w + te_w + pk_w
+
+        st.markdown(
+            f"""
+            <div class="power-row">
+              <div class="power-top">
+                <div class="team-rank">{int(row["Overall_Rank"])}</div>
+                <div class="team-name">{clean(row["Team"])}</div>
+                <div class="power-bar">
+                  <div class="seg-qb" style="width:{qb_w/total*100:.1f}%"></div>
+                  <div class="seg-rb" style="width:{rb_w/total*100:.1f}%"></div>
+                  <div class="seg-wr" style="width:{wr_w/total*100:.1f}%"></div>
+                  <div class="seg-te" style="width:{te_w/total*100:.1f}%"></div>
+                  <div class="seg-pick" style="width:{pk_w/total*100:.1f}%"></div>
+                </div>
+                <div class="status-tag">{clean(row["Window"])}</div>
+              </div>
+              <div class="power-meta">
+                <span>Total {int(row["Total_Value"]):,}</span>
+                <span>QB #{int(row["QB_Rank"])}</span>
+                <span>RB #{int(row["RB_Rank"])}</span>
+                <span>WR #{int(row["WR_Rank"])}</span>
+                <span>TE #{int(row["TE_Rank"])}</span>
+                <span>Picks #{int(row["Pick_Rank"])}</span>
+                <span>Age {row["Avg_Age"]:.1f}</span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-        .sort_values("Estimated_Value", ascending=False)
-    )
-    st.dataframe(summary, hide_index=True, use_container_width=True)
-    st.dataframe(
-        view.sort_values(["Season", "Round", "Current Owner", "Original Team"]),
-        hide_index=True,
-        use_container_width=True,
-    )
 
 
-def render_market(players: pd.DataFrame) -> None:
-    render_brand()
-    st.subheader("Market")
-    query = st.text_input("Search player, franchise, or NFL team")
-    positions = st.multiselect("Positions", sorted(players["Position"].dropna().unique()))
+def render_rankings(players: pd.DataFrame) -> None:
+    render_brand("Player Rankings", "Search and compare the live dynasty market")
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        query = st.text_input("Search for a player, franchise or NFL team")
+    with c2:
+        positions = st.multiselect("Position", sorted(players["Position"].dropna().unique()))
+
     view = players.copy()
     if query:
         q = query.casefold()
@@ -637,9 +788,72 @@ def render_market(players: pd.DataFrame) -> None:
         view = view[view["Position"].isin(positions)]
 
     st.dataframe(
-        view.sort_values("FantasyCalc Value", ascending=False)[
-            ["Player", "Position", "NFL Team", "Team", "Age", "FantasyCalc Value", "Overall Rank", "30-Day Trend"]
+        view.sort_values("Value", ascending=False)[
+            ["Player", "Position", "NFL Team", "Team", "Age", "Value", "Overall Rank", "Position Rank", "Trend"]
         ],
+        hide_index=True,
+        use_container_width=True,
+        height=760,
+    )
+
+
+def render_trade_calculator(players: pd.DataFrame, picks: pd.DataFrame, teams: pd.DataFrame) -> None:
+    render_brand("Trade Centre", "Build and compare trade packages")
+    st.caption("Rough-draft calculator using FantasyCalc player values and estimated draft-pick values.")
+
+    player_options = {
+        f'{row["Player"]} — {row["Team"]} ({int(row["Value"]):,})': int(row["Value"])
+        for _, row in players.sort_values("Value", ascending=False).iterrows()
+    }
+    pick_options = {
+        f'{int(row["Season"])} R{int(row["Round"])} — {row["Current Owner"]} ({int(row["Value"]):,})': int(row["Value"])
+        for _, row in picks.iterrows()
+    }
+    all_options = {**player_options, **pick_options}
+
+    left, right = st.columns(2, gap="large")
+    with left:
+        st.markdown("### They Receive")
+        give = st.multiselect("Add assets", list(all_options.keys()), key="give")
+        give_value = sum(all_options[x] for x in give)
+        st.metric("Package Value", f"{give_value:,}")
+    with right:
+        st.markdown("### I Receive")
+        receive = st.multiselect("Add assets", list(all_options.keys()), key="receive")
+        receive_value = sum(all_options[x] for x in receive)
+        st.metric("Package Value", f"{receive_value:,}")
+
+    difference = receive_value - give_value
+    if give or receive:
+        if abs(difference) <= max(500, int((give_value + receive_value) * .05)):
+            st.success(f"Approximately balanced. Difference: {difference:+,}")
+        elif difference > 0:
+            st.info(f"Your side receives about {difference:,} more value.")
+        else:
+            st.warning(f"Your side gives about {abs(difference):,} more value.")
+
+
+def render_draft(picks: pd.DataFrame, teams: pd.DataFrame) -> None:
+    render_brand("Draft Capital", "Review future pick ownership across the league")
+    owner = st.selectbox("Current owner", ["All teams"] + teams["Team"].tolist())
+    view = picks.copy()
+    if owner != "All teams":
+        view = view[view["Current Owner"] == owner]
+
+    summary = (
+        view.groupby("Current Owner", as_index=False)
+        .agg(
+            Total_Picks=("Round", "count"),
+            Firsts=("Round", lambda x: int((x == 1).sum())),
+            Seconds=("Round", lambda x: int((x == 2).sum())),
+            Thirds=("Round", lambda x: int((x == 3).sum())),
+            Estimated_Value=("Value", "sum"),
+        )
+        .sort_values("Estimated_Value", ascending=False)
+    )
+    st.dataframe(summary, hide_index=True, use_container_width=True)
+    st.dataframe(
+        view.sort_values(["Season", "Round", "Current Owner", "Original Team"]),
         hide_index=True,
         use_container_width=True,
     )
@@ -649,7 +863,7 @@ def main() -> None:
     st.sidebar.markdown("## 🏈 Front Office")
     page = st.sidebar.radio(
         "Navigation",
-        ["Portfolio", "League", "Franchise Review", "Trade Lab", "Draft", "Market"],
+        ["My Team", "League", "Rankings", "Trade Centre", "Draft Capital"],
         label_visibility="collapsed",
     )
     st.sidebar.markdown("---")
@@ -660,29 +874,27 @@ def main() -> None:
         st.rerun()
 
     try:
-        with st.spinner("Loading live league and market data..."):
+        with st.spinner("Loading Sleeper and FantasyCalc data..."):
             bundle = load_sleeper_bundle(LEAGUE_ID)
             fc_rows = load_fantasycalc()
-            players = build_player_table(bundle, fc_rows)
-            picks = build_pick_inventory(bundle)
-            teams = build_team_table(players, picks)
+            players = build_players(bundle, fc_rows)
+            picks = build_picks(bundle)
+            teams = build_teams(players, picks)
     except Exception as exc:
-        st.error("The application could not load live data.")
+        st.error("The live application could not load.")
         st.exception(exc)
         st.stop()
 
-    if page == "Portfolio":
-        render_portfolio(teams, players, picks, bundle["league"].get("name", "Weekend Warriors"))
+    if page == "My Team":
+        render_team_review(teams, players, picks, bundle["league"].get("name", "Weekend Warriors"))
     elif page == "League":
-        render_league(teams)
-    elif page == "Franchise Review":
-        render_franchise_review(teams, players, picks)
-    elif page == "Trade Lab":
-        render_trade_lab(teams, players)
-    elif page == "Draft":
-        render_draft(picks, teams)
+        render_power_rankings(teams)
+    elif page == "Rankings":
+        render_rankings(players)
+    elif page == "Trade Centre":
+        render_trade_calculator(players, picks, teams)
     else:
-        render_market(players)
+        render_draft(picks, teams)
 
 
 if __name__ == "__main__":

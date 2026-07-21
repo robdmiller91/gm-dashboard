@@ -1,17 +1,27 @@
-# Fantasy Football Front Office v0.3
+# Fantasy Football Front Office — Milestone 2 Rough Draft
 
-A visual redesign inspired by modern fantasy portfolio dashboards, while retaining the Front Office product identity.
+This rough draft focuses on the requested visual direction:
 
-## v0.3 highlights
+- Original Front Office branding
+- Dark, dense league-management interface
+- Player headshots using ESPN IDs when available
+- Horizontal roster-card strip
+- Position-by-position roster construction
+- League power rankings with segmented bars
+- Player rankings page
+- Two-sided trade calculator
+- Draft capital view
 
-- Dark portfolio-first layout
-- Position columns for QB, RB, WR, TE and draft picks
-- Positional league ranks
-- Portfolio percentile panel
-- League power board
-- Franchise review
-- Trade Lab
-- Draft capital
-- Player market
+## Deployment
 
-Deploy with `app.py` as the Streamlit main file.
+Replace the existing files in the GitHub repository with:
+
+- `app.py`
+- `requirements.txt`
+- `README.md`
+
+Streamlit Community Cloud will redeploy automatically.
+
+## Notes
+
+Player images use ESPN headshot URLs when the Sleeper player record contains an ESPN ID. A generic NFL image is used as a fallback.
