@@ -1319,9 +1319,28 @@ def render_trade_intelligence(
     )
 
     st.markdown("### Suggested Trade Scenarios")
+
+    # Keep the ranked partner table as the recommendation layer, but allow
+    # scenarios to be generated against every other franchise in the league.
+    all_partner_options = [
+        candidate
+        for candidate in teams["Team"].tolist()
+        if candidate != team
+    ]
+    recommended_order = partners["Team"].tolist()
+    ordered_partner_options = recommended_order + [
+        candidate
+        for candidate in all_partner_options
+        if candidate not in recommended_order
+    ]
+
     partner = st.selectbox(
-        "Generate scenarios with",
-        partners["Team"].head(8).tolist(),
+        "Generate scenarios with any team",
+        ordered_partner_options,
+        help=(
+            "Teams are ordered by roster and draft-capital fit, but every "
+            "other franchise is available."
+        ),
     )
 
     scenarios = build_trade_scenarios(teams, players, picks, team, partner)
