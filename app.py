@@ -507,7 +507,7 @@ st.markdown(
     }
     .draftboard-grid {
       display:grid;
-      gap:.4rem;
+      gap:.35rem;
       margin-bottom:1.2rem;
     }
     .draftboard-head {
@@ -524,98 +524,80 @@ st.markdown(
       text-overflow:ellipsis;
     }
     .draftboard-cell {
+      display:flex;
+      align-items:stretch;
       border-radius:12px;
-      padding:.4rem .5rem;
+      overflow:hidden;
+      height:64px;
+      box-sizing:border-box;
       color:#081018;
       position:relative;
-      width:100%;
-      height:104px;
-      box-sizing:border-box;
-      overflow:hidden;
     }
     .draftboard-cell.empty {
       background:var(--panel2);
       color:var(--muted);
-      display:flex;
       align-items:center;
       justify-content:center;
       text-align:center;
     }
-    .draftboard-pick-no {
-      position:absolute;
-      top:.35rem;
-      right:.45rem;
-      font-size:.6rem;
-      font-weight:900;
-      opacity:.7;
-    }
-    .draftboard-cell-body {
+    .draftboard-text {
+      flex:1;
+      min-width:0;
+      padding:.3rem .5rem;
       display:flex;
-      align-items:flex-start;
-      gap:.4rem;
-      height:100%;
+      flex-direction:column;
+      justify-content:center;
+      gap:.08rem;
+    }
+    .draftboard-row1 {
+      display:flex;
+      justify-content:space-between;
+      align-items:baseline;
+      gap:.35rem;
+    }
+    .draftboard-player {
+      font-size:.8rem;
+      font-weight:900;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      min-width:0;
+    }
+    .draftboard-pick-no {
+      font-size:.66rem;
+      font-weight:800;
+      opacity:.75;
+      flex-shrink:0;
+    }
+    .draftboard-meta {
+      font-size:.66rem;
+      font-weight:700;
+      opacity:.85;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .draftboard-arrow {
+      font-size:.62rem;
+      font-weight:800;
+      opacity:.9;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      margin-top:.05rem;
     }
     .draftboard-photo {
-      width:40px;
-      height:40px;
-      border-radius:8px;
-      overflow:hidden;
+      width:56px;
       flex-shrink:0;
+      overflow:hidden;
       background:rgba(0,0,0,.18);
-      margin-top:.05rem;
     }
     .draftboard-photo img {
       width:100%;
       height:100%;
       object-fit:cover;
       object-position:center top;
-    }
-    .draftboard-info {
-      display:flex;
-      flex-direction:column;
-      min-width:0;
-      flex:1;
-      padding-top:.6rem;
-    }
-    .draftboard-player {
-      font-size:.76rem;
-      font-weight:900;
-      line-height:1.15;
-      white-space:nowrap;
-      overflow:hidden;
-      text-overflow:ellipsis;
-    }
-    .draftboard-meta {
-      font-size:.64rem;
-      font-weight:700;
-      opacity:.85;
-      margin-top:.12rem;
-      white-space:nowrap;
-      overflow:hidden;
-      text-overflow:ellipsis;
-    }
-    .draftboard-team {
-      font-size:.6rem;
-      font-weight:700;
-      opacity:.75;
-      margin-top:.2rem;
-      white-space:nowrap;
-      overflow:hidden;
-      text-overflow:ellipsis;
-    }
-    .draftboard-arrow {
-      font-size:.58rem;
-      font-weight:900;
-      margin-top:.2rem;
-      color:#081018;
-      background:rgba(255,255,255,.35);
-      border-radius:6px;
-      padding:.05rem .3rem;
-      display:inline-block;
-      white-space:nowrap;
-      overflow:hidden;
-      text-overflow:ellipsis;
-      max-width:100%;
+      display:block;
     }
     </style>
     """,
@@ -2107,7 +2089,7 @@ def render_draft(picks: pd.DataFrame, teams: pd.DataFrame) -> None:
 DEVY_PROSPECTS_PATH = "devy_prospects.csv"
 
 
-def render_draft_history(bundle: dict[str, Any]) -> None:
+def render_draft_history(bundle: dict[str, Any], players: pd.DataFrame) -> None:
     render_brand("Draft History", "Review past draft results, round by round")
 
     league_id = str(bundle["league"].get("league_id") or LEAGUE_ID)
@@ -2127,10 +2109,14 @@ def render_draft_history(bundle: dict[str, Any]) -> None:
         st.info(f"No draft picks were found for the {chosen} season.")
         return
 
+    # Current roster owner for every player, so we can flag anyone who's
+    # since been traded away from the team that originally drafted them.
+    current_team_by_id = dict(zip(players["Sleeper ID"].astype(str), players["Team"]))
+
     rounds = sorted(board["Round"].unique())
     slots = sorted(board["Slot"].unique())
     slot_team = {
-        s: board[board["Slot"] == s].sort_values("Round").iloc[0]["Original Team"]
+        s: board[board["Slot"] == s].sort_values("Round").iloc[0]["Team"]
         for s in slots
     }
     total_teams = len(slots)
@@ -2147,23 +2133,25 @@ def render_draft_history(bundle: dict[str, Any]) -> None:
                 continue
             r = cell.iloc[0]
             pick_in_round = int(r["Pick No"]) - (int(rnd) - 1) * total_teams
-            keeper_tag = " · K" if r["Is Keeper"] else ""
+
+            current_team = current_team_by_id.get(str(r["Sleeper ID"]))
             arrow = (
-                f'<div class="draftboard-arrow">↳ {clean(r["Original Team"])}</div>'
-                if r["Traded"] else ""
+                f'<div class="draftboard-arrow">→ {clean(current_team)}</div>'
+                if current_team and current_team != r["Team"] else ""
             )
+
             body += (
                 f'<div class="draftboard-cell {pos_class(r["Position"])}">'
-                f'<div class="draftboard-pick-no">{int(rnd)}.{pick_in_round:02d}{keeper_tag}</div>'
-                f'<div class="draftboard-cell-body">'
+                f'<div class="draftboard-text">'
+                f'<div class="draftboard-row1">'
+                f'<span class="draftboard-player">{clean(r["Player"])}</span>'
+                f'<span class="draftboard-pick-no">{int(rnd)}.{pick_in_round:02d}</span>'
+                f'</div>'
+                f'<div class="draftboard-meta">{clean(r["Position"])} - {clean(r["NFL Team"])}</div>'
+                f'{arrow}'
+                f'</div>'
                 f'<div class="draftboard-photo"><img src="{clean(r["Image"])}"'
                 f' onerror="this.onerror=null;this.src=\'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png\';"></div>'
-                f'<div class="draftboard-info">'
-                f'<div class="draftboard-player">{clean(r["Player"])}</div>'
-                f'<div class="draftboard-meta">{clean(r["Position"])} · {clean(r["NFL Team"])}</div>'
-                f'<div class="draftboard-team">{clean(r["Team"])}</div>'
-                f'{arrow}'
-                f'</div></div>'
                 f'</div>'
             )
 
@@ -2173,14 +2161,13 @@ def render_draft_history(bundle: dict[str, Any]) -> None:
     )
 
     st.caption(
-        "Columns are ordered by each team's original draft slot for that season. "
-        "\"↳ from\" marks a pick made by a team other than the one that originally held that slot — "
-        "i.e. it was acquired via trade before the draft."
+        "Columns show who made each pick that season. The → arrow means that player has since "
+        "been traded away to a different roster — it points to whoever owns them now."
     )
 
     with st.expander("View as a table"):
         st.dataframe(
-            board[["Round", "Pick No", "Team", "Player", "Position", "NFL Team", "Traded", "Original Team"]]
+            board[["Round", "Pick No", "Team", "Player", "Position", "NFL Team", "Is Keeper"]]
             .sort_values(["Round", "Pick No"]),
             hide_index=True,
             use_container_width=True,
@@ -2641,7 +2628,7 @@ def main() -> None:
     elif page == "Draft Capital":
         render_draft(picks, teams)
     elif page == "Draft History":
-        render_draft_history(bundle)
+        render_draft_history(bundle, players)
     else:
         render_mock_draft(bundle, fc_rows, picks, teams)
 
