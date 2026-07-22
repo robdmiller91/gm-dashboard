@@ -1130,6 +1130,28 @@ def render_rankings(players: pd.DataFrame) -> None:
 
 
 
+UNTOUCHABLE_AGE_CUTOFFS = {"QB": 33, "RB": 25, "WR": 27, "TE": 28}
+
+
+def compute_untouchables(players: pd.DataFrame, top_n: int = 24) -> set[str]:
+    """Elite, still-ascending assets that stay off the table in trade analysis,
+    even when the raw value math would technically 'work'.
+
+    This mirrors how dynasty managers actually treat true cornerstone pieces —
+    a young workhorse RB1 like Jahmyr Gibbs doesn't get shopped just because
+    a package matches his FantasyCalc value. The rule: rank in the league-wide
+    top `top_n` by value, AND fall under a position-specific age ceiling (an
+    ageing top-24 asset is still tradeable; a young one generally isn't).
+    """
+    pool = players[players["Value"] > 0].sort_values("Value", ascending=False).head(top_n)
+
+    def young_enough(row: pd.Series) -> bool:
+        cutoff = UNTOUCHABLE_AGE_CUTOFFS.get(row["Position"], 27)
+        return bool(pd.isna(row["Age"]) or row["Age"] <= cutoff)
+
+    return set(pool[pool.apply(young_enough, axis=1)]["Player"])
+
+
 def positional_profile(teams: pd.DataFrame, team: str) -> dict[str, int]:
     row = teams[teams["Team"] == team].iloc[0]
     return {
@@ -1223,8 +1245,11 @@ def mutual_fit(
     weak — i.e. what I have that could plausibly fill their need. 'their_offers'
     are the partner's players at positions where my_team ranks weak. This is
     a needs-fit lens (who has what the other side is missing), not a
-    value-balanced trade proposal like the Trade Centre scenarios.
+    value-balanced trade proposal like the Trade Centre scenarios. Untouchable
+    cornerstone players are excluded from both sides — a mutual fit isn't
+    realistic if it hinges on someone giving up a player they'd never move.
     """
+    untouchables = compute_untouchables(players)
     my_profile = positional_profile(teams, my_team)
     my_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p], reverse=True)
 
@@ -1235,8 +1260,8 @@ def mutual_fit(
         their_profile = positional_profile(teams, partner)
         their_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: their_profile[p], reverse=True)
 
-        my_offers = player_assets(players, my_team, their_needs[:2])[:max_offers]
-        their_offers = player_assets(players, partner, my_needs[:2])[:max_offers]
+        my_offers = player_assets(players, my_team, their_needs[:2], exclude=untouchables)[:max_offers]
+        their_offers = player_assets(players, partner, my_needs[:2], exclude=untouchables)[:max_offers]
 
         results.append(
             {
@@ -1256,10 +1281,13 @@ def player_assets(
     players: pd.DataFrame,
     team: str,
     positions: list[str] | None = None,
+    exclude: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     owned = players[players["Team"] == team].copy()
     if positions:
         owned = owned[owned["Position"].isin(positions)]
+    if exclude:
+        owned = owned[~owned["Player"].isin(exclude)]
     owned = owned.sort_values("Value", ascending=False)
     return [
         {"label": row["Player"], "value": int(row["Value"]), "type": "player", "position": row["Position"]}
@@ -1311,6 +1339,7 @@ def build_trade_scenarios(
     picks: pd.DataFrame,
     my_team: str,
     partner: str,
+    untouchables: set[str],
 ) -> list[dict[str, Any]]:
     mine = positional_profile(teams, my_team)
     theirs = positional_profile(teams, partner)
@@ -1323,8 +1352,11 @@ def build_trade_scenarios(
         ["QB", "RB", "WR", "TE"], key=lambda p: mine[p]
     )[:2]
 
-    targets = player_assets(players, partner, target_positions)
-    outgoing_players = player_assets(players, my_team, outgoing_positions)
+    # Neither side's untouchable cornerstone pieces are realistic trade
+    # chips, so they're excluded from both what we'd send and what we'd
+    # target from the partner.
+    targets = player_assets(players, partner, target_positions, exclude=untouchables)
+    outgoing_players = player_assets(players, my_team, outgoing_positions, exclude=untouchables)
     my_picks = pick_assets(picks, my_team)
     their_picks = pick_assets(picks, partner)
 
@@ -1374,6 +1406,50 @@ def build_trade_scenarios(
     return scenarios[:3]
 
 
+def build_simple_trades(
+    players: pd.DataFrame,
+    picks: pd.DataFrame,
+    my_team: str,
+    partner: str,
+    untouchables: set[str],
+    max_ideas: int = 3,
+) -> list[dict[str, Any]]:
+    """Straightforward single-asset-for-single-asset trade ideas.
+
+    No multi-piece packages, no positional-need logic — just every one of my
+    tradeable assets (players + picks) paired against every one of theirs,
+    kept if the values are reasonably close. This is the "would you just do
+    this?" layer that sits alongside the more elaborate need-based scenarios.
+    """
+    mine = player_assets(players, my_team, exclude=untouchables) + pick_assets(picks, my_team)
+    theirs = player_assets(players, partner, exclude=untouchables) + pick_assets(picks, partner)
+    if not mine or not theirs:
+        return []
+
+    ideas = []
+    for give in mine[:15]:
+        for receive in theirs[:15]:
+            gv, rv = give["value"], receive["value"]
+            if gv <= 0 or rv <= 0:
+                continue
+            match = max(0, 100 - int(abs(rv - gv) / max(rv, gv) * 100))
+            ideas.append({"give": [give], "receive": [receive], "match": match})
+
+    ideas.sort(key=lambda x: -x["match"])
+    out, seen_give, seen_receive = [], set(), set()
+    for idea in ideas:
+        g_label = idea["give"][0]["label"]
+        r_label = idea["receive"][0]["label"]
+        if g_label in seen_give or r_label in seen_receive:
+            continue
+        seen_give.add(g_label)
+        seen_receive.add(r_label)
+        out.append(idea)
+        if len(out) == max_ideas:
+            break
+    return out
+
+
 def assets_html(assets: list[dict[str, Any]]) -> str:
     return "".join(
         f'<div class="trade-asset"><span>{clean(a["label"])}</span><span>{int(a["value"]):,}</span></div>'
@@ -1382,12 +1458,19 @@ def assets_html(assets: list[dict[str, Any]]) -> str:
 
 
 
-def selectable_assets(players: pd.DataFrame, picks: pd.DataFrame, team: str) -> dict[str, dict[str, Any]]:
+def selectable_assets(
+    players: pd.DataFrame,
+    picks: pd.DataFrame,
+    team: str,
+    untouchables: set[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    untouchables = untouchables or set()
     assets = {}
     for _, row in players[players["Team"] == team].sort_values("Value", ascending=False).iterrows():
         if int(row["Value"]) <= 0:
             continue
-        key = f'{row["Player"]} · {row["Position"]} · {int(row["Value"]):,}'
+        lock = "🔒 " if row["Player"] in untouchables else ""
+        key = f'{lock}{row["Player"]} · {row["Position"]} · {int(row["Value"]):,}'
         assets[key] = {"label": row["Player"], "value": int(row["Value"]), "type": "player", "position": row["Position"]}
     for _, row in picks[picks["Current Owner"] == team].sort_values(["Season", "Round"]).iterrows():
         label = f'{int(row["Season"])} R{int(row["Round"])}'
@@ -1434,15 +1517,21 @@ def package_candidates(assets: list[dict[str, Any]], target: int, favourable: bo
     return out
 
 
-def render_custom_trade_builder(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame, team: str) -> None:
+def render_custom_trade_builder(
+    teams: pd.DataFrame,
+    players: pd.DataFrame,
+    picks: pd.DataFrame,
+    team: str,
+    untouchables: set[str],
+) -> None:
     st.markdown("### Custom Trade Builder")
     partner = st.selectbox(
         "Trade partner",
         [x for x in teams["Team"].tolist() if x != team],
         key="manual_partner",
     )
-    mine = selectable_assets(players, picks, team)
-    theirs = selectable_assets(players, picks, partner)
+    mine = selectable_assets(players, picks, team, untouchables)
+    theirs = selectable_assets(players, picks, partner, untouchables)
 
     left, right = st.columns(2)
     with left:
@@ -1454,6 +1543,14 @@ def render_custom_trade_builder(teams: pd.DataFrame, players: pd.DataFrame, pick
     receive_assets = labels_to_assets(receive_labels, theirs)
     send_value = package_value(send_assets)
     receive_value = package_value(receive_assets)
+
+    locked_outgoing = [a["label"] for a in send_assets if a["label"] in untouchables]
+    if locked_outgoing:
+        st.warning(
+            f"🔒 {', '.join(locked_outgoing)} — flagged as an untouchable cornerstone asset "
+            "(elite value, still young for the position). You can still build this trade, "
+            "but it's not one the auto-generated scenarios would ever suggest."
+        )
 
     c1, c2, c3 = st.columns(3)
     c1.metric("You send", f"{send_value:,}")
@@ -1598,14 +1695,36 @@ def render_trade_intelligence(
     strengths = sorted(["QB", "RB", "WR", "TE"], key=lambda p: profile[p])[:2]
     needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: profile[p], reverse=True)[:2]
 
+    with st.expander("Untouchable threshold", expanded=False):
+        untouchable_n = st.slider(
+            "Treat the league-wide top N value players as untouchable (subject to age limits)",
+            min_value=6, max_value=48, value=24, step=2,
+            help=(
+                "Elite, still-young assets (e.g. a workhorse RB1 in his mid-20s) are excluded "
+                "from auto-generated trade suggestions even if the value math balances. "
+                "Ageing top-N players don't get the same protection."
+            ),
+        )
+    untouchables = compute_untouchables(players, top_n=untouchable_n)
+    my_untouchables = sorted(
+        players[(players["Team"] == team) & (players["Player"].isin(untouchables))]["Player"]
+    )
+
     render_html(
         f'<div class="gm-card"><b>{clean(team)}</b> is strongest at '
         f'<b>{clean(" and ".join(strengths))}</b> and has the clearest needs at '
         f'<b>{clean(" and ".join(needs))}</b>. Partner fit uses positional rankings, '
-        'competitive window and owned draft capital.</div>'
+        'competitive window and owned draft capital.'
+        + (
+            f'<br><b>🔒 Untouchable:</b> {clean(", ".join(my_untouchables))} — excluded from '
+            "auto-generated scenarios below, but still selectable in the custom builder."
+            if my_untouchables else
+            f"<br>No {clean(team)} player currently clears the untouchable bar."
+        )
+        + '</div>'
     )
 
-    render_custom_trade_builder(teams, players, picks, team)
+    render_custom_trade_builder(teams, players, picks, team, untouchables)
 
     st.markdown("---")
     st.markdown("### Recommended Trade Partners")
@@ -1623,8 +1742,6 @@ def render_trade_intelligence(
             for _, r in partners.head(8).iterrows()
         )
     )
-
-    st.markdown("### Suggested Trade Scenarios")
 
     # Keep the ranked partner table as the recommendation layer, but allow
     # scenarios to be generated against every other franchise in the league.
@@ -1649,7 +1766,33 @@ def render_trade_intelligence(
         ),
     )
 
-    scenarios = build_trade_scenarios(teams, players, picks, team, partner)
+    st.markdown("### Simple Trade Ideas")
+    st.caption(
+        f"Straightforward one-for-one swaps between {team} and {partner} — no multi-piece "
+        "packages, just close value matches. Untouchable players are excluded."
+    )
+    simple_ideas = build_simple_trades(players, picks, team, partner, untouchables)
+    if not simple_ideas:
+        st.info("No close one-for-one matches were found between these two rosters.")
+    for idea in simple_ideas:
+        gv = idea["give"][0]["value"]
+        rv = idea["receive"][0]["value"]
+        render_html(
+            f'<div class="trade-card"><div class="trade-card-top"><b>Simple swap</b>'
+            f'<span class="fit-badge">{idea["match"]}% value match</span></div>'
+            f'<div class="trade-grid"><div class="trade-side">'
+            f'<div class="trade-side-title">{clean(team)} sends</div>'
+            f'{assets_html(idea["give"])}</div>'
+            f'<div class="trade-arrow">⇄</div>'
+            f'<div class="trade-side"><div class="trade-side-title">{clean(team)} receives</div>'
+            f'{assets_html(idea["receive"])}</div></div>'
+            f'<div class="trade-rationale">Value difference in your favour: {rv - gv:+,}.</div></div>'
+        )
+
+    st.markdown("### Suggested Trade Scenarios")
+    st.caption("Multi-piece, need-based packages built around each team's positional gaps.")
+
+    scenarios = build_trade_scenarios(teams, players, picks, team, partner, untouchables)
     if not scenarios:
         st.info("No reasonable scenarios were generated from the current values.")
         return
