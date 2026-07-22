@@ -464,6 +464,47 @@ st.markdown(
       .power-top { grid-template-columns:34px 130px 1fr; }
       .status-tag { display:none; }
     }
+
+    .draft-round-grid {
+      display:grid;
+      grid-template-columns:repeat(auto-fill,minmax(148px,1fr));
+      gap:.65rem;
+      margin-bottom:1.15rem;
+    }
+    .draft-pick-card {
+      background:var(--panel2);
+      border:1px solid var(--border);
+      border-radius:15px;
+      overflow:hidden;
+      position:relative;
+    }
+    .draft-pick-top {
+      display:flex; justify-content:space-between; align-items:center;
+      padding:.35rem .5rem;
+    }
+    .draft-pick-overall { font-weight:900; font-size:.76rem; color:var(--muted); }
+    .draft-pick-photo {
+      height:95px;
+      display:flex; align-items:flex-end; justify-content:center;
+      background:linear-gradient(180deg,#202a39,#111827);
+      overflow:hidden;
+    }
+    .draft-pick-photo img {
+      width:100%; height:100%; object-fit:contain; object-position:center bottom;
+    }
+    .draft-pick-body { padding:.55rem; }
+    .draft-pick-name {
+      font-size:.82rem; font-weight:800;
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    }
+    .draft-pick-team {
+      font-size:.72rem; color:var(--muted); margin-top:.1rem;
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    }
+    .draft-pick-reason {
+      font-size:.68rem; color:#93c5fd; margin-top:.35rem;
+      line-height:1.25;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -1572,11 +1613,305 @@ def render_draft(picks: pd.DataFrame, teams: pd.DataFrame) -> None:
     )
 
 
+def build_rookies(bundle: dict[str, Any], fc_rows: list[dict[str, Any]], season: int) -> pd.DataFrame:
+    """Rookie-eligible skill-position players for the mock draft pool.
+
+    A player counts as a rookie if Sleeper records zero years of experience,
+    or their rookie year matches the draft season. FantasyCalc dynasty value
+    is the primary ranking signal; Sleeper's community "search_rank" (lower
+    is better) fills in for prospects the market hasn't priced yet.
+    """
+    fc_by_id = {
+        row["sleeper_id"]: row
+        for row in (normalise_fc(x) for x in fc_rows)
+        if row["sleeper_id"]
+    }
+
+    rows: list[dict[str, Any]] = []
+    for pid, p in bundle["players"].items():
+        if not isinstance(p, dict):
+            continue
+        position = p.get("position")
+        if position not in {"QB", "RB", "WR", "TE"}:
+            continue
+
+        years_exp = p.get("years_exp")
+        rookie_year = p.get("rookie_year")
+        is_rookie = years_exp == 0 or (rookie_year and str(rookie_year) == str(season))
+        if not is_rookie:
+            continue
+        if (p.get("status") or "").lower() in {"retired", "inactive"}:
+            continue
+
+        fc = fc_by_id.get(str(pid), {})
+        name = (
+            p.get("full_name")
+            or " ".join(filter(None, [p.get("first_name"), p.get("last_name")]))
+            or pid
+        )
+        rows.append(
+            {
+                "Player": name,
+                "Position": position,
+                "NFL Team": p.get("team") or "FA",
+                "Age": p.get("age"),
+                "Value": int(fc.get("value") or 0),
+                "Search Rank": p.get("search_rank") or 999_999,
+                "Sleeper ID": str(pid),
+                "Image": player_image_url({**p, "player_id": str(pid)}),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    df["Has Value"] = df["Value"] > 0
+    df = df.sort_values(["Has Value", "Value", "Search Rank"], ascending=[False, False, True])
+    df["Prospect Rank"] = range(1, len(df) + 1)
+    return df.drop(columns="Has Value").reset_index(drop=True)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_previous_rosters(previous_league_id: str | None) -> list[dict[str, Any]]:
+    if not previous_league_id or str(previous_league_id) == "0":
+        return []
+    try:
+        return get_json(f"{SLEEPER_BASE}/league/{previous_league_id}/rosters")
+    except DataError:
+        return []
+
+
+def standings_order(rosters: list[dict[str, Any]], roster_to_team: dict[int, str]) -> pd.DataFrame:
+    """Teams sorted worst-to-first by record, the standard rookie-draft slotting rule."""
+    rows = []
+    for r in rosters:
+        settings = r.get("settings") or {}
+        wins = int(settings.get("wins") or 0)
+        losses = int(settings.get("losses") or 0)
+        ties = int(settings.get("ties") or 0)
+        fpts = float(settings.get("fpts") or 0) + float(settings.get("fpts_decimal") or 0) / 100
+        games = max(wins + losses + ties, 1)
+        roster_id = int(r.get("roster_id"))
+        rows.append(
+            {
+                "Team": roster_to_team.get(roster_id, f"Roster {roster_id}"),
+                "Wins": wins,
+                "Losses": losses,
+                "Ties": ties,
+                "Points": round(fpts, 1),
+                "Win %": round(wins / games, 3),
+            }
+        )
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["Win %", "Points"], ascending=[True, True])
+        .reset_index(drop=True)
+    )
+
+
+def simulate_mock_draft(
+    picks: pd.DataFrame,
+    teams: pd.DataFrame,
+    rookies: pd.DataFrame,
+    order: list[str],
+    season: int,
+    rounds: int,
+    need_weight: float,
+) -> pd.DataFrame:
+    """Assign the rookie pool to picks for one season, respecting real pick ownership.
+
+    `order` lists original-slot teams worst-to-best record. For every round
+    we look up who currently owns each original team's pick (so prior trades
+    are reflected via the existing picks table), then select from the
+    remaining rookie pool. need_weight of 0 is pure best-player-available;
+    1 leans hard on filling each team's weakest positional room.
+    """
+    if rookies.empty or not order:
+        return pd.DataFrame()
+
+    board = picks[(picks["Season"] == season) & (picks["Round"] <= rounds)]
+    if board.empty:
+        return pd.DataFrame()
+
+    pool = rookies.sort_values("Prospect Rank").to_dict("records")
+    team_names = set(teams["Team"])
+    results = []
+
+    for rnd in sorted(board["Round"].unique()):
+        for slot_idx, original_team in enumerate(order, start=1):
+            row = board[(board["Round"] == rnd) & (board["Original Team"] == original_team)]
+            if row.empty or not pool:
+                continue
+            current_owner = row.iloc[0]["Current Owner"]
+            profile = positional_profile(teams, current_owner) if current_owner in team_names else {}
+
+            def score(p: dict[str, Any], profile: dict[str, int] = profile) -> float:
+                base = -p["Prospect Rank"]
+                need_rank = profile.get(p["Position"], 6)
+                return base + need_rank * need_weight * 3
+
+            pool.sort(key=score, reverse=True)
+            selection = pool.pop(0)
+
+            reason = "Best player available"
+            if profile:
+                weakest = max(["QB", "RB", "WR", "TE"], key=lambda pos: profile.get(pos, 6))
+                if selection["Position"] == weakest:
+                    reason = f"Fills the {weakest} need (currently ranked #{profile[weakest]})"
+
+            results.append(
+                {
+                    "Season": season,
+                    "Round": int(rnd),
+                    "Slot": slot_idx,
+                    "Overall": (int(rnd) - 1) * len(order) + slot_idx,
+                    "Team": current_owner,
+                    "Original Slot Team": original_team,
+                    "Player": selection["Player"],
+                    "Position": selection["Position"],
+                    "Prospect Rank": selection["Prospect Rank"],
+                    "Value": selection["Value"],
+                    "Image": selection["Image"],
+                    "Reason": reason,
+                }
+            )
+
+    return pd.DataFrame(results)
+
+
+def render_mock_draft(
+    bundle: dict[str, Any],
+    fc_rows: list[dict[str, Any]],
+    picks: pd.DataFrame,
+    teams: pd.DataFrame,
+) -> None:
+    render_brand("Mock Draft", "Rookie-only simulated draft using pick ownership and team needs")
+
+    render_html(
+        '<div class="gm-card"><b>How this works:</b> draft slots are ordered worst-to-first by '
+        "record (the standard rookie-draft rule), then matched to whoever currently owns that "
+        "pick after trades. Rookies are pulled live from Sleeper and ranked by FantasyCalc dynasty "
+        "value where the market has priced them. This is a simulation, not a prediction of the "
+        "real draft.</div>"
+    )
+
+    league = bundle["league"]
+    users = {str(u.get("user_id")): team_name(u) for u in bundle["users"]}
+    roster_to_team = {
+        int(r["roster_id"]): users.get(str(r.get("owner_id")), f"Roster {r['roster_id']}")
+        for r in bundle["rosters"]
+    }
+
+    seasons = sorted(picks["Season"].unique())
+    default_season = int(league.get("season") or seasons[0])
+
+    c1, c2, c3 = st.columns([1, 1, 1.4])
+    with c1:
+        season = st.selectbox(
+            "Draft season",
+            seasons,
+            index=seasons.index(default_season) if default_season in seasons else 0,
+        )
+    with c2:
+        max_rounds = int(picks["Round"].max())
+        rounds = st.number_input("Rounds", min_value=1, max_value=max_rounds, value=min(3, max_rounds))
+    with c3:
+        strategy = st.slider(
+            "Draft strategy",
+            0.0, 1.0, 0.35,
+            help="0 = pure best-player-available, 1 = heavily need-based",
+        )
+
+    use_previous = st.checkbox(
+        "Base draft order on last season's final standings (previous league history) "
+        "instead of the current live record",
+        value=True,
+    )
+
+    order_df = pd.DataFrame()
+    if use_previous:
+        previous_rosters = load_previous_rosters(league.get("previous_league_id"))
+        if previous_rosters:
+            order_df = standings_order(previous_rosters, roster_to_team)
+        else:
+            st.info(
+                "No previous-season standings were found for this league; "
+                "using the current record instead."
+            )
+    if order_df.empty:
+        order_df = standings_order(bundle["rosters"], roster_to_team)
+
+    with st.expander("Draft order basis (worst record picks first)"):
+        st.dataframe(order_df, hide_index=True, use_container_width=True)
+
+    order = order_df["Team"].tolist()
+
+    rookies = build_rookies(bundle, fc_rows, int(season))
+    if rookies.empty:
+        st.warning("No rookie-eligible players were found for this season.")
+        return
+
+    with st.expander(f"Rookie pool ({len(rookies)} players)"):
+        st.dataframe(
+            rookies[["Prospect Rank", "Player", "Position", "NFL Team", "Age", "Value"]],
+            hide_index=True,
+            use_container_width=True,
+            height=420,
+        )
+
+    state_key = f"mock_draft_{season}_{rounds}_{strategy}_{use_previous}"
+    if st.button("Generate mock draft", use_container_width=True) or state_key not in st.session_state:
+        st.session_state[state_key] = simulate_mock_draft(
+            picks, teams, rookies, order, int(season), int(rounds), strategy
+        )
+
+    board = st.session_state.get(state_key, pd.DataFrame())
+    if board.empty:
+        st.info("No picks were available to simulate for this season/round combination.")
+        return
+
+    for rnd in sorted(board["Round"].unique()):
+        render_html(f'<div class="section-title"><h3>Round {int(rnd)}</h3></div>')
+        round_rows = board[board["Round"] == rnd].sort_values("Slot")
+        cards = "".join(
+            f"""
+            <div class="draft-pick-card">
+              <div class="draft-pick-top">
+                <span class="draft-pick-overall">#{int(r["Overall"])}</span>
+                <span class="pos-pill {pos_class(r["Position"])}">{clean(r["Position"])}</span>
+              </div>
+              <div class="draft-pick-photo">
+                <img src="{clean(r["Image"])}"
+                     onerror="this.onerror=null;this.src='https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png';">
+              </div>
+              <div class="draft-pick-body">
+                <div class="draft-pick-name">{clean(r["Player"])}</div>
+                <div class="draft-pick-team">{clean(r["Team"])}</div>
+                <div class="draft-pick-reason">{clean(r["Reason"])}</div>
+              </div>
+            </div>
+            """
+            for _, r in round_rows.iterrows()
+        )
+        render_html(f'<div class="draft-round-grid">{cards}</div>')
+
+    st.download_button(
+        "Download mock draft as CSV",
+        board[
+            ["Overall", "Round", "Slot", "Team", "Player", "Position", "Prospect Rank", "Reason"]
+        ].to_csv(index=False),
+        file_name=f"mock_draft_{season}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
 def main() -> None:
     st.sidebar.markdown("## 🏈 Front Office")
     page = st.sidebar.radio(
         "Navigation",
-        ["My Team", "League", "Rankings", "Trade Centre", "Draft Capital"],
+        ["My Team", "League", "Rankings", "Trade Centre", "Draft Capital", "Mock Draft"],
         label_visibility="collapsed",
     )
     st.sidebar.markdown("---")
@@ -1606,8 +1941,10 @@ def main() -> None:
         render_rankings(players)
     elif page == "Trade Centre":
         render_trade_intelligence(teams, players, picks)
-    else:
+    elif page == "Draft Capital":
         render_draft(picks, teams)
+    else:
+        render_mock_draft(bundle, fc_rows, picks, teams)
 
 
 if __name__ == "__main__":
