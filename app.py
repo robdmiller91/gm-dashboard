@@ -1278,6 +1278,133 @@ def assets_html(assets: list[dict[str, Any]]) -> str:
     ) or '<div class="trade-asset"><span>No assets</span><span>—</span></div>'
 
 
+
+def selectable_assets(players: pd.DataFrame, picks: pd.DataFrame, team: str) -> dict[str, dict[str, Any]]:
+    assets = {}
+    for _, row in players[players["Team"] == team].sort_values("Value", ascending=False).iterrows():
+        if int(row["Value"]) <= 0:
+            continue
+        key = f'{row["Player"]} · {row["Position"]} · {int(row["Value"]):,}'
+        assets[key] = {"label": row["Player"], "value": int(row["Value"]), "type": "player", "position": row["Position"]}
+    for _, row in picks[picks["Current Owner"] == team].sort_values(["Season", "Round"]).iterrows():
+        label = f'{int(row["Season"])} R{int(row["Round"])}'
+        if row["Traded"]:
+            label += f' ({str(row["Original Team"])[:10]})'
+        key = f'{label} · Pick · {int(row["Value"]):,}'
+        assets[key] = {"label": label, "value": int(row["Value"]), "type": "pick"}
+    return assets
+
+
+def package_value(assets: list[dict[str, Any]]) -> int:
+    return sum(int(a["value"]) for a in assets)
+
+
+def labels_to_assets(labels: list[str], mapping: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    return [mapping[x] for x in labels if x in mapping]
+
+
+def package_candidates(assets: list[dict[str, Any]], target: int, favourable: bool) -> list[list[dict[str, Any]]]:
+    if not assets or target <= 0:
+        return []
+    desired = target * (0.93 if favourable else 1.0)
+    pool = assets[:22]
+    scored = []
+    for a in pool:
+        scored.append((abs(a["value"] - desired), [a]))
+    for i, a in enumerate(pool):
+        for b in pool[i+1:]:
+            scored.append((abs(a["value"] + b["value"] - desired), [a, b]))
+    for i, a in enumerate(pool[:14]):
+        for j, b in enumerate(pool[i+1:14], start=i+1):
+            for c in pool[j+1:14]:
+                scored.append((abs(a["value"] + b["value"] + c["value"] - desired), [a, b, c]))
+    scored.sort(key=lambda x: x[0])
+    out, seen = [], set()
+    for _, pkg in scored:
+        sig = tuple(sorted(x["label"] for x in pkg))
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append(pkg)
+        if len(out) == 5:
+            break
+    return out
+
+
+def render_custom_trade_builder(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame, team: str) -> None:
+    st.markdown("### Custom Trade Builder")
+    partner = st.selectbox(
+        "Trade partner",
+        [x for x in teams["Team"].tolist() if x != team],
+        key="manual_partner",
+    )
+    mine = selectable_assets(players, picks, team)
+    theirs = selectable_assets(players, picks, partner)
+
+    left, right = st.columns(2)
+    with left:
+        send_labels = st.multiselect(f"{team} sends", list(mine.keys()), key="manual_send")
+    with right:
+        receive_labels = st.multiselect(f"{team} receives", list(theirs.keys()), key="manual_receive")
+
+    send_assets = labels_to_assets(send_labels, mine)
+    receive_assets = labels_to_assets(receive_labels, theirs)
+    send_value = package_value(send_assets)
+    receive_value = package_value(receive_assets)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("You send", f"{send_value:,}")
+    c2.metric("You receive", f"{receive_value:,}")
+    c3.metric("Difference", f"{receive_value-send_value:+,}")
+
+    pref = st.radio(
+        "Suggestion preference",
+        ["Balanced", "Slightly favourable to my team"],
+        horizontal=True,
+        key="manual_pref",
+    )
+    favourable = pref.startswith("Slightly")
+
+    if not send_assets and not receive_assets:
+        st.info("Select at least one player or pick on either side.")
+        return
+
+    st.markdown("#### Suggested Packages")
+
+    if receive_assets:
+        remaining = max(0, receive_value - send_value)
+        available = [a for k, a in mine.items() if k not in send_labels]
+        suggestions = package_candidates(available, remaining, favourable) if remaining else [[]]
+        for i, extra in enumerate(suggestions[:4], start=1):
+            full_send = send_assets + extra
+            gv, rv = package_value(full_send), receive_value
+            match = max(0, 100 - int(abs(rv-gv)/max(rv, gv, 1)*100))
+            render_html(
+                f'<div class="trade-card"><div class="trade-card-top"><b>Suggested Offer {i}</b>'
+                f'<span class="fit-badge">{match}% value match</span></div>'
+                f'<div class="trade-grid"><div class="trade-side"><div class="trade-side-title">{clean(team)} sends</div>'
+                f'{assets_html(full_send)}<div class="trade-asset"><b>Total</b><b>{gv:,}</b></div></div>'
+                f'<div class="trade-arrow">⇄</div><div class="trade-side"><div class="trade-side-title">{clean(team)} receives</div>'
+                f'{assets_html(receive_assets)}<div class="trade-asset"><b>Total</b><b>{rv:,}</b></div></div></div>'
+                f'<div class="trade-rationale">Value difference in your favour: {rv-gv:+,}.</div></div>'
+            )
+    else:
+        desired = int(send_value * (1.08 if favourable else 1.0))
+        suggestions = package_candidates(list(theirs.values()), desired, False)
+        for i, incoming in enumerate(suggestions[:4], start=1):
+            gv, rv = send_value, package_value(incoming)
+            match = max(0, 100 - int(abs(rv-gv)/max(rv, gv, 1)*100))
+            render_html(
+                f'<div class="trade-card"><div class="trade-card-top"><b>Suggested Return {i}</b>'
+                f'<span class="fit-badge">{match}% value match</span></div>'
+                f'<div class="trade-grid"><div class="trade-side"><div class="trade-side-title">{clean(team)} sends</div>'
+                f'{assets_html(send_assets)}<div class="trade-asset"><b>Total</b><b>{gv:,}</b></div></div>'
+                f'<div class="trade-arrow">⇄</div><div class="trade-side"><div class="trade-side-title">{clean(team)} receives</div>'
+                f'{assets_html(incoming)}<div class="trade-asset"><b>Total</b><b>{rv:,}</b></div></div></div>'
+                f'<div class="trade-rationale">Value difference in your favour: {rv-gv:+,}.</div></div>'
+            )
+
+
 def render_trade_intelligence(
     teams: pd.DataFrame,
     players: pd.DataFrame,
@@ -1303,6 +1430,11 @@ def render_trade_intelligence(
         f'<b>{clean(" and ".join(needs))}</b>. Partner fit uses positional rankings, '
         'competitive window and owned draft capital.</div>'
     )
+
+    render_custom_trade_builder(teams, players, picks, team)
+
+    st.markdown("---")
+    st.markdown("### Recommended Trade Partners")
 
     partners = trade_partner_scores(teams, team)
 
