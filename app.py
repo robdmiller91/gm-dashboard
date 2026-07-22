@@ -505,10 +505,15 @@ st.markdown(
       font-size:.68rem; color:#93c5fd; margin-top:.35rem;
       line-height:1.25;
     }
+    .draftboard-scroll {
+      overflow-x:auto;
+      margin-bottom:1.2rem;
+      padding-bottom:.3rem;
+    }
     .draftboard-grid {
       display:grid;
       gap:.35rem;
-      margin-bottom:1.2rem;
+      min-width:max-content;
     }
     .draftboard-head {
       background:var(--panel2);
@@ -587,7 +592,7 @@ st.markdown(
       margin-top:.05rem;
     }
     .draftboard-photo {
-      width:56px;
+      width:44px;
       flex-shrink:0;
       overflow:hidden;
       background:rgba(0,0,0,.18);
@@ -2157,13 +2162,15 @@ def render_draft_history(bundle: dict[str, Any], players: pd.DataFrame) -> None:
             )
 
     render_html(
-        f'<div class="draftboard-grid" style="grid-template-columns:repeat({total_teams},1fr)">'
-        f'{header}{body}</div>'
+        f'<div class="draftboard-scroll">'
+        f'<div class="draftboard-grid" style="grid-template-columns:repeat({total_teams},minmax(132px,1fr))">'
+        f'{header}{body}</div></div>'
     )
 
     st.caption(
-        "Columns show who made each pick that season. The → arrow means that player has since "
-        "been traded away to a different roster — it points to whoever owns them now."
+        "Scroll horizontally to see every team. Columns show who made each pick that season. "
+        "The → arrow means that player has since been traded away to a different roster — "
+        "it points to whoever owns them now."
     )
 
     with st.expander("View as a table"):
