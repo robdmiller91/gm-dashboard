@@ -2054,6 +2054,7 @@ def build_draft_board(season_entry: dict[str, Any]) -> pd.DataFrame:
                 "Position": meta.get("position") or "",
                 "NFL Team": meta.get("team") or "FA",
                 "Is Keeper": bool(p.get("is_keeper")),
+                "Sleeper ID": str(sleeper_id) if sleeper_id else "",
                 "Image": player_image_url({"player_id": sleeper_id}),
             }
         )
