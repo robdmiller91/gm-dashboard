@@ -1190,6 +1190,68 @@ def trade_partner_scores(
     )
 
 
+def league_needs_board(teams: pd.DataFrame) -> pd.DataFrame:
+    """One row per team summarising positional strengths/needs and draft capital."""
+    rows = []
+    for _, row in teams.iterrows():
+        team = row["Team"]
+        profile = positional_profile(teams, team)
+        strengths = sorted(["QB", "RB", "WR", "TE"], key=lambda p: profile[p])[:2]
+        needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: profile[p], reverse=True)[:2]
+        rows.append(
+            {
+                "Team": team,
+                "Overall Rank": int(row["Overall_Rank"]),
+                "Window": row["Window"],
+                "Strengths": ", ".join(strengths),
+                "Needs": ", ".join(needs),
+                "Pick Rank": int(row["Pick_Rank"]),
+            }
+        )
+    return pd.DataFrame(rows).sort_values("Overall Rank")
+
+
+def mutual_fit(
+    teams: pd.DataFrame,
+    players: pd.DataFrame,
+    my_team: str,
+    max_offers: int = 4,
+) -> list[dict[str, Any]]:
+    """For every other team, work out what each side's roster could do for the other.
+
+    'my_offers' are my_team's players at positions where the partner ranks
+    weak — i.e. what I have that could plausibly fill their need. 'their_offers'
+    are the partner's players at positions where my_team ranks weak. This is
+    a needs-fit lens (who has what the other side is missing), not a
+    value-balanced trade proposal like the Trade Centre scenarios.
+    """
+    my_profile = positional_profile(teams, my_team)
+    my_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p], reverse=True)
+
+    partners = trade_partner_scores(teams, my_team)
+    results = []
+    for _, r in partners.iterrows():
+        partner = r["Team"]
+        their_profile = positional_profile(teams, partner)
+        their_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: their_profile[p], reverse=True)
+
+        my_offers = player_assets(players, my_team, their_needs[:2])[:max_offers]
+        their_offers = player_assets(players, partner, my_needs[:2])[:max_offers]
+
+        results.append(
+            {
+                "Team": partner,
+                "Fit Score": int(r["Fit Score"]),
+                "Window": r["Window"],
+                "their_needs": their_needs[:2],
+                "my_needs": my_needs[:2],
+                "my_offers": my_offers,
+                "their_offers": their_offers,
+            }
+        )
+    return results
+
+
 def player_assets(
     players: pd.DataFrame,
     team: str,
@@ -1446,6 +1508,77 @@ def render_custom_trade_builder(teams: pd.DataFrame, players: pd.DataFrame, pick
             )
 
 
+def render_team_needs(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame) -> None:
+    render_brand("Team Needs", "League-wide positional needs and mutual roster fit")
+
+    render_html('<div class="section-title"><h3>League Needs Board</h3></div>')
+    board = league_needs_board(teams)
+    render_html(
+        '<div class="partner-row"><b>Team</b><b>Rank</b><b>Window</b><b>Strengths</b><b>Needs</b></div>'
+        + "".join(
+            f'<div class="partner-row"><span><b>{clean(r["Team"])}</b></span>'
+            f'<span>#{int(r["Overall Rank"])}</span><span>{clean(r["Window"])}</span>'
+            f'<span>{clean(r["Strengths"])}</span><span>{clean(r["Needs"])}</span></div>'
+            for _, r in board.iterrows()
+        )
+    )
+    st.caption("Strengths/needs are each team's top-2 and bottom-2 ranked positions by total FantasyCalc value.")
+
+    st.markdown("---")
+    st.markdown("### Mutual Fit With Your Roster")
+
+    team_names = teams["Team"].tolist()
+    default_team = find_my_team(team_names) or team_names[0]
+    my_team = st.selectbox(
+        "Analyze mutual fit from the perspective of",
+        team_names,
+        index=team_names.index(default_team),
+        key="team_needs_my_team",
+    )
+
+    my_profile = positional_profile(teams, my_team)
+    my_strengths = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p])[:2]
+    my_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p], reverse=True)[:2]
+
+    render_html(
+        f'<div class="gm-card"><b>{clean(my_team)}</b> is strongest at '
+        f'<b>{clean(" and ".join(my_strengths))}</b> and has the clearest needs at '
+        f'<b>{clean(" and ".join(my_needs))}</b>. Each card below shows what your roster '
+        "could plausibly offer that specific team's weak spots, and what their roster has "
+        "that could fill yours — a needs-fit read, not a value-balanced trade proposal.</div>"
+    )
+
+    fits = mutual_fit(teams, players, my_team)
+    if not fits:
+        st.info("No other teams were found to compare against.")
+        return
+
+    for f in fits:
+        their_needs_label = " / ".join(f["their_needs"])
+        my_needs_label = " / ".join(f["my_needs"])
+        render_html(
+            f'<div class="trade-card">'
+            f'<div class="trade-card-top"><div><b>{clean(f["Team"])}</b>'
+            f'<div class="small-muted">{clean(f["Window"])}</div></div>'
+            f'<span class="fit-badge">{f["Fit Score"]} fit</span></div>'
+            f'<div class="trade-grid"><div class="trade-side">'
+            f'<div class="trade-side-title">You could help their {clean(their_needs_label)} need</div>'
+            f'{assets_html(f["my_offers"])}</div>'
+            f'<div class="trade-arrow">⇄</div>'
+            f'<div class="trade-side"><div class="trade-side-title">'
+            f'They could help your {clean(my_needs_label)} need</div>'
+            f'{assets_html(f["their_offers"])}</div></div>'
+            f'<div class="trade-rationale">Fit score blends positional complementarity, '
+            f'competitive window and available draft capital — higher means a more natural match.</div>'
+            f'</div>'
+        )
+
+    st.caption(
+        "This is a needs-matching view, not a proposed trade — head to Trade Centre to build "
+        "and value an actual package between two teams."
+    )
+
+
 def render_trade_intelligence(
     teams: pd.DataFrame,
     players: pd.DataFrame,
@@ -1613,13 +1746,64 @@ def render_draft(picks: pd.DataFrame, teams: pd.DataFrame) -> None:
     )
 
 
-def build_rookies(bundle: dict[str, Any], fc_rows: list[dict[str, Any]], season: int) -> pd.DataFrame:
+DEVY_PROSPECTS_PATH = "devy_prospects.csv"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_devy_prospects(path: str = DEVY_PROSPECTS_PATH) -> pd.DataFrame:
+    """Curated devy/rookie board for draft classes too far out for Sleeper to have real players.
+
+    Sleeper only lists actual NFL players, so a season more than ~1 year away
+    is essentially empty in build_rookies. This loads a hand-maintained CSV
+    aggregated from public dynasty rookie mock-draft coverage (Dynasty Nerds,
+    Dynasty League Football, DraftSharks, FootballGuys forums, Roto Street
+    Journal, FlurrySports, NFL Mock Draft Database) as a stand-in pool. It is
+    NOT live data and will drift as the season progresses — treat it as
+    directional, and refresh the CSV periodically from current mock drafts.
+    """
+    try:
+        return pd.read_csv(path)
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        return pd.DataFrame()
+
+
+def build_devy_pool(devy_df: pd.DataFrame, season: int) -> pd.DataFrame:
+    if devy_df.empty:
+        return pd.DataFrame()
+    view = devy_df[devy_df["Season"] == season].copy()
+    if view.empty:
+        return pd.DataFrame()
+
+    view = view.sort_values("Consensus Rank").reset_index(drop=True)
+    view["Prospect Rank"] = range(1, len(view) + 1)
+    top_rank = view["Consensus Rank"].max()
+    view["Value"] = ((top_rank - view["Consensus Rank"] + 1) * 40).astype(int)
+    view["Search Rank"] = view["Consensus Rank"]
+    view["NFL Team"] = view["School"]
+    view["Age"] = None
+    view["Sleeper ID"] = ""
+    view["Image"] = "https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png"
+    return view[
+        ["Player", "Position", "NFL Team", "Age", "Value", "Search Rank",
+         "Sleeper ID", "Image", "Prospect Rank", "Notes"]
+    ]
+
+
+def build_rookies(
+    bundle: dict[str, Any],
+    fc_rows: list[dict[str, Any]],
+    season: int,
+    current_season: int,
+) -> pd.DataFrame:
     """Rookie-eligible skill-position players for the mock draft pool.
 
-    A player counts as a rookie if Sleeper records zero years of experience,
-    or their rookie year matches the draft season. FantasyCalc dynasty value
-    is the primary ranking signal; Sleeper's community "search_rank" (lower
-    is better) fills in for prospects the market hasn't priced yet.
+    Sleeper's years_exp == 0 flag means "currently in their rookie season" —
+    it isn't tied to a specific future season, so it's only a valid signal
+    when the requested draft season is the current one. For a season further
+    out (e.g. mocking next year's class before this year's is even final),
+    we instead require Sleeper's own rookie_year to match, which will
+    correctly come back thin-to-empty until that class actually exists as
+    real NFL players.
     """
     fc_by_id = {
         row["sleeper_id"]: row
@@ -1637,7 +1821,9 @@ def build_rookies(bundle: dict[str, Any], fc_rows: list[dict[str, Any]], season:
 
         years_exp = p.get("years_exp")
         rookie_year = p.get("rookie_year")
-        is_rookie = years_exp == 0 or (rookie_year and str(rookie_year) == str(season))
+        matches_target_season = bool(rookie_year) and str(rookie_year) == str(season)
+        is_current_years_rookie = season == current_season and years_exp == 0
+        is_rookie = matches_target_season or is_current_years_rookie
         if not is_rookie:
             continue
         if (p.get("status") or "").lower() in {"retired", "inactive"}:
@@ -1680,6 +1866,37 @@ def load_previous_rosters(previous_league_id: str | None) -> list[dict[str, Any]
         return get_json(f"{SLEEPER_BASE}/league/{previous_league_id}/rosters")
     except DataError:
         return []
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_league_drafts(league_id: str) -> list[dict[str, Any]]:
+    try:
+        return get_json(f"{SLEEPER_BASE}/league/{league_id}/drafts")
+    except DataError:
+        return []
+
+
+def official_draft_order(
+    drafts: list[dict[str, Any]],
+    season: int,
+    users: dict[str, str],
+) -> list[str]:
+    """The commissioner-set draft order from Sleeper, if one exists for this season.
+
+    Sleeper stores this on the draft object as draft_order: a dict mapping
+    user_id -> 1-indexed slot number. This reflects manual reordering (e.g. a
+    league using a set order rather than reverse-standings) and should take
+    priority over any computed order.
+    """
+    for d in drafts:
+        if str(d.get("season")) != str(season):
+            continue
+        order_map = d.get("draft_order") or {}
+        if not order_map:
+            continue
+        slots = sorted(order_map.items(), key=lambda kv: kv[1])
+        return [users.get(str(uid), str(uid)) for uid, _ in slots]
+    return []
 
 
 def standings_order(rosters: list[dict[str, Any]], roster_to_team: dict[int, str]) -> pd.DataFrame:
@@ -1829,30 +2046,70 @@ def render_mock_draft(
         value=True,
     )
 
-    order_df = pd.DataFrame()
-    if use_previous:
-        previous_rosters = load_previous_rosters(league.get("previous_league_id"))
-        if previous_rosters:
-            order_df = standings_order(previous_rosters, roster_to_team)
-        else:
-            st.info(
-                "No previous-season standings were found for this league; "
-                "using the current record instead."
-            )
-    if order_df.empty:
-        order_df = standings_order(bundle["rosters"], roster_to_team)
+    drafts = load_league_drafts(str(league.get("league_id") or LEAGUE_ID))
+    order = official_draft_order(drafts, int(season), users)
+    used_official_order = bool(order)
 
-    with st.expander("Draft order basis (worst record picks first)"):
+    if order:
+        st.success(
+            f"Using the official {int(season)} draft order set in Sleeper "
+            "(commissioner-configured, not computed)."
+        )
+        order_df = pd.DataFrame({"Slot": range(1, len(order) + 1), "Team": order})
+    else:
+        order_df = pd.DataFrame()
+        if use_previous:
+            previous_rosters = load_previous_rosters(league.get("previous_league_id"))
+            if previous_rosters:
+                order_df = standings_order(previous_rosters, roster_to_team)
+            else:
+                st.info(
+                    "No previous-season standings were found for this league; "
+                    "using the current record instead."
+                )
+        if order_df.empty:
+            order_df = standings_order(bundle["rosters"], roster_to_team)
+        st.caption(
+            "No official draft order is set for this season in Sleeper yet, "
+            "so this order is estimated from standings."
+        )
+        order = order_df["Team"].tolist()
+
+    with st.expander("Draft order basis"):
         st.dataframe(order_df, hide_index=True, use_container_width=True)
 
-    order = order_df["Team"].tolist()
+    rookies = build_rookies(bundle, fc_rows, int(season), default_season)
+    devy_pool = build_devy_pool(load_devy_prospects(), int(season))
 
-    rookies = build_rookies(bundle, fc_rows, int(season))
+    using_devy_pool = False
+    if int(season) > default_season and len(rookies) < 12 and not devy_pool.empty:
+        rookies = devy_pool.drop(columns="Notes")
+        using_devy_pool = True
+        render_html(
+            f'<div class="gm-card"><b>Using a devy consensus board for {int(season)}:</b> '
+            "Sleeper doesn't have real NFL players for this class yet, since the actual draft "
+            "hasn't happened. This pool is aggregated from public dynasty rookie mock-draft "
+            "coverage (Dynasty Nerds, Dynasty League Football, DraftSharks, FootballGuys forums, "
+            "Roto Street Journal, FlurrySports, NFL Mock Draft Database) as of when "
+            f"<code>{clean(DEVY_PROSPECTS_PATH)}</code> was last updated. Treat it as directional "
+            "— players will transfer, get injured, declare early, or return to school between now "
+            "and the real draft. Refresh the CSV from current mock drafts periodically.</div>"
+        )
+    elif int(season) > default_season:
+        st.warning(
+            f"The {int(season)} rookie class won't be finalized until after the {int(season)} "
+            "NFL Draft (roughly next April). Sleeper only lists real, drafted NFL players, so "
+            "college underclassmen and other future-class prospects generally aren't in its "
+            "database yet, and no devy fallback list was found for this season either. Add rows "
+            f"for {int(season)} to {DEVY_PROSPECTS_PATH} to enable a mock draft this far out."
+        )
     if rookies.empty:
         st.warning("No rookie-eligible players were found for this season.")
         return
 
     with st.expander(f"Rookie pool ({len(rookies)} players)"):
+        if using_devy_pool:
+            st.caption("Source: curated devy consensus board, not live Sleeper data.")
         st.dataframe(
             rookies[["Prospect Rank", "Player", "Position", "NFL Team", "Age", "Value"]],
             hide_index=True,
@@ -1860,7 +2117,7 @@ def render_mock_draft(
             height=420,
         )
 
-    state_key = f"mock_draft_{season}_{rounds}_{strategy}_{use_previous}"
+    state_key = f"mock_draft_{season}_{rounds}_{strategy}_{'official' if used_official_order else use_previous}"
     if st.button("Generate mock draft", use_container_width=True) or state_key not in st.session_state:
         st.session_state[state_key] = simulate_mock_draft(
             picks, teams, rookies, order, int(season), int(rounds), strategy
@@ -1911,7 +2168,7 @@ def main() -> None:
     st.sidebar.markdown("## 🏈 Front Office")
     page = st.sidebar.radio(
         "Navigation",
-        ["My Team", "League", "Rankings", "Trade Centre", "Draft Capital", "Mock Draft"],
+        ["My Team", "League", "Rankings", "Team Needs", "Trade Centre", "Draft Capital", "Mock Draft"],
         label_visibility="collapsed",
     )
     st.sidebar.markdown("---")
@@ -1939,6 +2196,8 @@ def main() -> None:
         render_power_rankings(teams, players, picks)
     elif page == "Rankings":
         render_rankings(players)
+    elif page == "Team Needs":
+        render_team_needs(teams, players, picks)
     elif page == "Trade Centre":
         render_trade_intelligence(teams, players, picks)
     elif page == "Draft Capital":
