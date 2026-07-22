@@ -505,6 +505,79 @@ st.markdown(
       font-size:.68rem; color:#93c5fd; margin-top:.35rem;
       line-height:1.25;
     }
+    .draftboard-grid {
+      display:grid;
+      gap:.4rem;
+      margin-bottom:1.2rem;
+    }
+    .draftboard-head {
+      background:var(--panel2);
+      border:1px solid var(--border);
+      border-radius:10px;
+      padding:.4rem .3rem;
+      text-align:center;
+      font-size:.72rem;
+      font-weight:900;
+      color:var(--muted);
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .draftboard-cell {
+      border-radius:12px;
+      padding:.45rem .5rem;
+      color:#081018;
+      position:relative;
+      min-height:88px;
+      display:flex;
+      flex-direction:column;
+      justify-content:space-between;
+    }
+    .draftboard-cell.empty {
+      background:var(--panel2);
+      color:var(--muted);
+      align-items:center;
+      justify-content:center;
+      text-align:center;
+    }
+    .draftboard-pick-no {
+      font-size:.68rem;
+      font-weight:900;
+      opacity:.75;
+    }
+    .draftboard-player {
+      font-size:.82rem;
+      font-weight:900;
+      line-height:1.15;
+      margin-top:.15rem;
+    }
+    .draftboard-meta {
+      font-size:.68rem;
+      font-weight:700;
+      opacity:.85;
+    }
+    .draftboard-team {
+      font-size:.66rem;
+      font-weight:700;
+      margin-top:.3rem;
+      opacity:.8;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .draftboard-arrow {
+      font-size:.64rem;
+      font-weight:900;
+      margin-top:.2rem;
+      color:#081018;
+      background:rgba(255,255,255,.35);
+      border-radius:6px;
+      padding:.1rem .3rem;
+      display:inline-block;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -1863,6 +1936,107 @@ def render_trade_calculator(players: pd.DataFrame, picks: pd.DataFrame, teams: p
             st.warning(f"Your side gives about {abs(difference):,} more value.")
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_draft_history(league_id: str) -> list[dict[str, Any]]:
+    """Walk the league's previous_league_id chain, collecting each season's users/rosters/drafts.
+
+    Sleeper represents each season as its own league object, linked backward
+    via previous_league_id. There's no single endpoint for "all history," so
+    this walks the chain until it runs out (or hits a cycle/missing league).
+    """
+    history: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    current_id: str | None = league_id
+
+    while current_id and str(current_id) not in seen_ids and str(current_id) != "0":
+        seen_ids.add(str(current_id))
+        try:
+            league_obj = get_json(f"{SLEEPER_BASE}/league/{current_id}")
+        except DataError:
+            break
+        if not isinstance(league_obj, dict):
+            break
+
+        try:
+            users = get_json(f"{SLEEPER_BASE}/league/{current_id}/users")
+        except DataError:
+            users = []
+        try:
+            rosters = get_json(f"{SLEEPER_BASE}/league/{current_id}/rosters")
+        except DataError:
+            rosters = []
+        try:
+            drafts = get_json(f"{SLEEPER_BASE}/league/{current_id}/drafts")
+        except DataError:
+            drafts = []
+
+        history.append(
+            {
+                "season": league_obj.get("season"),
+                "league_id": str(current_id),
+                "users": users if isinstance(users, list) else [],
+                "rosters": rosters if isinstance(rosters, list) else [],
+                "drafts": drafts if isinstance(drafts, list) else [],
+            }
+        )
+        current_id = league_obj.get("previous_league_id")
+
+    return history
+
+
+def build_draft_board(season_entry: dict[str, Any]) -> pd.DataFrame:
+    """Actual draft results for one season, one row per pick, ready for a grid view."""
+    drafts = season_entry.get("drafts") or []
+    draft = next((d for d in drafts if (d.get("type") or "").lower() != "auction"), None)
+    if draft is None and drafts:
+        draft = drafts[0]
+    if not draft or not draft.get("draft_id"):
+        return pd.DataFrame()
+
+    try:
+        picks_raw = get_json(f"{SLEEPER_BASE}/draft/{draft['draft_id']}/picks")
+    except DataError:
+        return pd.DataFrame()
+    if not picks_raw:
+        return pd.DataFrame()
+
+    users_map = {str(u.get("user_id")): team_name(u) for u in season_entry.get("users") or []}
+    roster_owner = {
+        int(r["roster_id"]): users_map.get(str(r.get("owner_id")), f"Roster {r['roster_id']}")
+        for r in season_entry.get("rosters") or []
+    }
+    slot_to_roster = {
+        int(k): int(v) for k, v in (draft.get("slot_to_roster_id") or {}).items() if v
+    }
+
+    rows = []
+    for p in picks_raw:
+        meta = p.get("metadata") or {}
+        slot = int(p.get("draft_slot") or 0)
+        roster_id = p.get("roster_id")
+        original_roster = slot_to_roster.get(slot)
+        original_team = roster_owner.get(original_roster) if original_roster else None
+        picked_team = roster_owner.get(int(roster_id), f"Roster {roster_id}") if roster_id else "Unknown"
+        traded = bool(original_roster) and roster_id is not None and int(roster_id) != original_roster
+
+        name = f"{meta.get('first_name', '')} {meta.get('last_name', '')}".strip()
+        rows.append(
+            {
+                "Round": int(p.get("round") or 0),
+                "Slot": slot,
+                "Pick No": int(p.get("pick_no") or 0),
+                "Team": picked_team,
+                "Original Team": original_team or picked_team,
+                "Traded": traded,
+                "Player": name or meta.get("player_id", "Unknown"),
+                "Position": meta.get("position") or "",
+                "NFL Team": meta.get("team") or "FA",
+                "Is Keeper": bool(p.get("is_keeper")),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def render_draft(picks: pd.DataFrame, teams: pd.DataFrame) -> None:
     render_brand("Draft Capital", "Review future pick ownership across the league")
     owner = st.selectbox("Current owner", ["All teams"] + teams["Team"].tolist())
@@ -1890,6 +2064,81 @@ def render_draft(picks: pd.DataFrame, teams: pd.DataFrame) -> None:
 
 
 DEVY_PROSPECTS_PATH = "devy_prospects.csv"
+
+
+def render_draft_history(bundle: dict[str, Any]) -> None:
+    render_brand("Draft History", "Review past draft results, round by round")
+
+    league_id = str(bundle["league"].get("league_id") or LEAGUE_ID)
+    history = load_draft_history(league_id)
+    seasons_with_drafts = [h for h in history if h.get("drafts")]
+
+    if not seasons_with_drafts:
+        st.info("No completed drafts were found in this league's history yet.")
+        return
+
+    season_labels = [str(h["season"]) for h in seasons_with_drafts]
+    chosen = st.selectbox("Draft year", season_labels, index=0)
+    entry = seasons_with_drafts[season_labels.index(chosen)]
+
+    board = build_draft_board(entry)
+    if board.empty:
+        st.info(f"No draft picks were found for the {chosen} season.")
+        return
+
+    rounds = sorted(board["Round"].unique())
+    slots = sorted(board["Slot"].unique())
+    slot_team = {
+        s: board[board["Slot"] == s].sort_values("Round").iloc[0]["Original Team"]
+        for s in slots
+    }
+    total_teams = len(slots)
+
+    render_html(f'<div class="section-title"><h3>{clean(chosen)} Draft Board</h3></div>')
+
+    header = "".join(f'<div class="draftboard-head">{clean(slot_team[s])}</div>' for s in slots)
+    body = ""
+    for rnd in rounds:
+        for s in slots:
+            cell = board[(board["Round"] == rnd) & (board["Slot"] == s)]
+            if cell.empty:
+                body += '<div class="draftboard-cell empty">—</div>'
+                continue
+            r = cell.iloc[0]
+            pick_in_round = int(r["Pick No"]) - (int(rnd) - 1) * total_teams
+            keeper_tag = " · Keeper" if r["Is Keeper"] else ""
+            arrow = (
+                f'<div class="draftboard-arrow">↳ from {clean(r["Original Team"])}</div>'
+                if r["Traded"] else ""
+            )
+            body += (
+                f'<div class="draftboard-cell {pos_class(r["Position"])}">'
+                f'<div class="draftboard-pick-no">{int(rnd)}.{pick_in_round:02d}{keeper_tag}</div>'
+                f'<div class="draftboard-player">{clean(r["Player"])}</div>'
+                f'<div class="draftboard-meta">{clean(r["Position"])} · {clean(r["NFL Team"])}</div>'
+                f'<div class="draftboard-team">{clean(r["Team"])}</div>'
+                f'{arrow}'
+                f'</div>'
+            )
+
+    render_html(
+        f'<div class="draftboard-grid" style="grid-template-columns:repeat({total_teams},1fr)">'
+        f'{header}{body}</div>'
+    )
+
+    st.caption(
+        "Columns are ordered by each team's original draft slot for that season. "
+        "\"↳ from\" marks a pick made by a team other than the one that originally held that slot — "
+        "i.e. it was acquired via trade before the draft."
+    )
+
+    with st.expander("View as a table"):
+        st.dataframe(
+            board[["Round", "Pick No", "Team", "Player", "Position", "NFL Team", "Traded", "Original Team"]]
+            .sort_values(["Round", "Pick No"]),
+            hide_index=True,
+            use_container_width=True,
+        )
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -2311,7 +2560,7 @@ def main() -> None:
     st.sidebar.markdown("## 🏈 Front Office")
     page = st.sidebar.radio(
         "Navigation",
-        ["My Team", "League", "Rankings", "Team Needs", "Trade Centre", "Draft Capital", "Mock Draft"],
+        ["My Team", "League", "Rankings", "Team Needs", "Trade Centre", "Draft Capital", "Draft History", "Mock Draft"],
         label_visibility="collapsed",
     )
     st.sidebar.markdown("---")
@@ -2345,6 +2594,8 @@ def main() -> None:
         render_trade_intelligence(teams, players, picks)
     elif page == "Draft Capital":
         render_draft(picks, teams)
+    elif page == "Draft History":
+        render_draft_history(bundle)
     else:
         render_mock_draft(bundle, fc_rows, picks, teams)
 
