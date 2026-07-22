@@ -525,58 +525,97 @@ st.markdown(
     }
     .draftboard-cell {
       border-radius:12px;
-      padding:.45rem .5rem;
+      padding:.4rem .5rem;
       color:#081018;
       position:relative;
-      min-height:88px;
-      display:flex;
-      flex-direction:column;
-      justify-content:space-between;
+      width:100%;
+      height:104px;
+      box-sizing:border-box;
+      overflow:hidden;
     }
     .draftboard-cell.empty {
       background:var(--panel2);
       color:var(--muted);
+      display:flex;
       align-items:center;
       justify-content:center;
       text-align:center;
     }
     .draftboard-pick-no {
-      font-size:.68rem;
+      position:absolute;
+      top:.35rem;
+      right:.45rem;
+      font-size:.6rem;
       font-weight:900;
-      opacity:.75;
+      opacity:.7;
+    }
+    .draftboard-cell-body {
+      display:flex;
+      align-items:flex-start;
+      gap:.4rem;
+      height:100%;
+    }
+    .draftboard-photo {
+      width:40px;
+      height:40px;
+      border-radius:8px;
+      overflow:hidden;
+      flex-shrink:0;
+      background:rgba(0,0,0,.18);
+      margin-top:.05rem;
+    }
+    .draftboard-photo img {
+      width:100%;
+      height:100%;
+      object-fit:cover;
+      object-position:center top;
+    }
+    .draftboard-info {
+      display:flex;
+      flex-direction:column;
+      min-width:0;
+      flex:1;
+      padding-top:.6rem;
     }
     .draftboard-player {
-      font-size:.82rem;
+      font-size:.76rem;
       font-weight:900;
       line-height:1.15;
-      margin-top:.15rem;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
     }
     .draftboard-meta {
-      font-size:.68rem;
+      font-size:.64rem;
       font-weight:700;
       opacity:.85;
+      margin-top:.12rem;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
     }
     .draftboard-team {
-      font-size:.66rem;
+      font-size:.6rem;
       font-weight:700;
-      margin-top:.3rem;
-      opacity:.8;
+      opacity:.75;
+      margin-top:.2rem;
       white-space:nowrap;
       overflow:hidden;
       text-overflow:ellipsis;
     }
     .draftboard-arrow {
-      font-size:.64rem;
+      font-size:.58rem;
       font-weight:900;
       margin-top:.2rem;
       color:#081018;
       background:rgba(255,255,255,.35);
       border-radius:6px;
-      padding:.1rem .3rem;
+      padding:.05rem .3rem;
       display:inline-block;
       white-space:nowrap;
       overflow:hidden;
       text-overflow:ellipsis;
+      max-width:100%;
     }
     </style>
     """,
@@ -2020,6 +2059,7 @@ def build_draft_board(season_entry: dict[str, Any]) -> pd.DataFrame:
         traded = bool(original_roster) and roster_id is not None and int(roster_id) != original_roster
 
         name = f"{meta.get('first_name', '')} {meta.get('last_name', '')}".strip()
+        sleeper_id = p.get("player_id")
         rows.append(
             {
                 "Round": int(p.get("round") or 0),
@@ -2032,6 +2072,7 @@ def build_draft_board(season_entry: dict[str, Any]) -> pd.DataFrame:
                 "Position": meta.get("position") or "",
                 "NFL Team": meta.get("team") or "FA",
                 "Is Keeper": bool(p.get("is_keeper")),
+                "Image": player_image_url({"player_id": sleeper_id}),
             }
         )
     return pd.DataFrame(rows)
@@ -2106,18 +2147,23 @@ def render_draft_history(bundle: dict[str, Any]) -> None:
                 continue
             r = cell.iloc[0]
             pick_in_round = int(r["Pick No"]) - (int(rnd) - 1) * total_teams
-            keeper_tag = " · Keeper" if r["Is Keeper"] else ""
+            keeper_tag = " · K" if r["Is Keeper"] else ""
             arrow = (
-                f'<div class="draftboard-arrow">↳ from {clean(r["Original Team"])}</div>'
+                f'<div class="draftboard-arrow">↳ {clean(r["Original Team"])}</div>'
                 if r["Traded"] else ""
             )
             body += (
                 f'<div class="draftboard-cell {pos_class(r["Position"])}">'
                 f'<div class="draftboard-pick-no">{int(rnd)}.{pick_in_round:02d}{keeper_tag}</div>'
+                f'<div class="draftboard-cell-body">'
+                f'<div class="draftboard-photo"><img src="{clean(r["Image"])}"'
+                f' onerror="this.onerror=null;this.src=\'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png\';"></div>'
+                f'<div class="draftboard-info">'
                 f'<div class="draftboard-player">{clean(r["Player"])}</div>'
                 f'<div class="draftboard-meta">{clean(r["Position"])} · {clean(r["NFL Team"])}</div>'
                 f'<div class="draftboard-team">{clean(r["Team"])}</div>'
                 f'{arrow}'
+                f'</div></div>'
                 f'</div>'
             )
 
