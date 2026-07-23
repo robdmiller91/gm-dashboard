@@ -1616,6 +1616,131 @@ def package_candidates(assets: list[dict[str, Any]], target: int, favourable: bo
     return out
 
 
+def build_asset_pool(
+    players: pd.DataFrame,
+    picks: pd.DataFrame,
+    include_teams: list[str] | None = None,
+    exclude_teams: list[str] | None = None,
+    show_team_label: bool = False,
+) -> dict[str, dict[str, Any]]:
+    """Selectable players/picks across one or more teams, for Roster Lab's give/acquire pickers.
+
+    include_teams restricts to just those teams (e.g. "my own assets to give up").
+    exclude_teams removes teams from an otherwise league-wide pool (e.g. "anyone
+    else's assets I could acquire"). show_team_label appends the owning team to
+    the label, useful when the pool spans multiple teams.
+    """
+    pool_players = players[players["Value"] > 0]
+    pool_picks = picks
+    if include_teams:
+        pool_players = pool_players[pool_players["Team"].isin(include_teams)]
+        pool_picks = pool_picks[pool_picks["Current Owner"].isin(include_teams)]
+    if exclude_teams:
+        pool_players = pool_players[~pool_players["Team"].isin(exclude_teams)]
+        pool_picks = pool_picks[~pool_picks["Current Owner"].isin(exclude_teams)]
+
+    assets: dict[str, dict[str, Any]] = {}
+    for _, row in pool_players.sort_values("Value", ascending=False).iterrows():
+        suffix = f' · {row["Team"]}' if show_team_label else ""
+        key = f'{row["Player"]} · {row["Position"]} · {int(row["Value"]):,}{suffix}'
+        assets[key] = {
+            "label": row["Player"], "value": int(row["Value"]), "type": "player",
+            "position": row["Position"], "team": row["Team"],
+        }
+    for _, row in pool_picks.sort_values(["Season", "Round"]).iterrows():
+        label = f'{int(row["Season"])} R{int(row["Round"])}'
+        suffix = f' · {row["Current Owner"]}' if show_team_label else ""
+        key = f'{label} · Pick · {int(row["Value"]):,}{suffix}'
+        assets[key] = {
+            "label": label, "value": int(row["Value"]), "type": "pick",
+            "team": row["Current Owner"], "season": int(row["Season"]), "round": int(row["Round"]),
+        }
+    return assets
+
+
+def apply_roster_moves(
+    players: pd.DataFrame,
+    picks: pd.DataFrame,
+    my_team: str,
+    give_assets: list[dict[str, Any]],
+    acquire_assets: list[dict[str, Any]],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return copies of players/picks reflecting a hypothetical set of moves.
+
+    Giving up an asset removes it from the pool outright (this tool doesn't
+    model who receives it, only how your own roster changes). Acquiring an
+    asset simply reassigns its Team/Current Owner to my_team, which correctly
+    removes it from whoever previously held it too.
+    """
+    players_mod = players.copy()
+    picks_mod = picks.copy()
+
+    for a in give_assets:
+        if a["type"] == "player":
+            players_mod = players_mod[
+                ~((players_mod["Team"] == my_team) & (players_mod["Player"] == a["label"]))
+            ]
+        else:
+            picks_mod = picks_mod[
+                ~(
+                    (picks_mod["Current Owner"] == my_team)
+                    & (picks_mod["Season"] == a["season"])
+                    & (picks_mod["Round"] == a["round"])
+                )
+            ]
+
+    for a in acquire_assets:
+        if a["type"] == "player":
+            players_mod.loc[
+                (players_mod["Team"] == a["team"]) & (players_mod["Player"] == a["label"]), "Team"
+            ] = my_team
+        else:
+            picks_mod.loc[
+                (picks_mod["Current Owner"] == a["team"])
+                & (picks_mod["Season"] == a["season"])
+                & (picks_mod["Round"] == a["round"]),
+                "Current Owner",
+            ] = my_team
+
+    return players_mod, picks_mod
+
+
+POSITION_AGE_CURVES = {
+    "QB": {"peak": 29, "growth": 0.035, "decline": 0.045},
+    "RB": {"peak": 24, "growth": 0.060, "decline": 0.150},
+    "WR": {"peak": 26, "growth": 0.050, "decline": 0.070},
+    "TE": {"peak": 27, "growth": 0.045, "decline": 0.060},
+}
+
+
+def project_value(value: float, position: str, age: float | None, years_ahead: int) -> float:
+    """Rough dynasty aging heuristic: value keeps climbing toward a position's
+    typical peak age, then decays afterward at a position-specific rate (RBs
+    fastest, QBs slowest). This is a simple directional model for planning,
+    not a statistical forecast — real outcomes depend on landing spot, injury
+    luck, scheme fit, and dozens of things this can't see.
+    """
+    if value <= 0 or age is None or pd.isna(age):
+        return value
+    curve = POSITION_AGE_CURVES.get(position, {"peak": 27, "growth": 0.045, "decline": 0.07})
+    a, v = float(age), float(value)
+    for _ in range(years_ahead):
+        v *= (1 + curve["growth"]) if a < curve["peak"] else (1 - curve["decline"])
+        a += 1
+    return v
+
+
+def project_roster_trajectory(players: pd.DataFrame, team: str, years: int = 3) -> list[float]:
+    roster = players[(players["Team"] == team) & (players["Value"] > 0)]
+    trajectory = [float(roster["Value"].sum())]
+    for y in range(1, years + 1):
+        total = sum(
+            project_value(r["Value"], r["Position"], r["Age"], y) for _, r in roster.iterrows()
+        )
+        trajectory.append(total)
+    return trajectory
+
+
 def render_custom_trade_builder(
     teams: pd.DataFrame,
     players: pd.DataFrame,
@@ -1773,6 +1898,113 @@ def render_team_needs(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.Data
         "This is a needs-matching view, not a proposed trade — head to Trade Centre to build "
         "and value an actual package between two teams."
     )
+
+
+def render_roster_lab(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame) -> None:
+    render_brand(
+        "Roster Lab",
+        "Plug in hypothetical moves and project your roster's rank now — and its trajectory in the coming years",
+    )
+
+    team_names = teams["Team"].tolist()
+    default_team = find_my_team(team_names) or team_names[0]
+    my_team = st.selectbox(
+        "Your team", team_names, index=team_names.index(default_team), key="lab_my_team"
+    )
+
+    render_html(
+        '<div class="gm-card">Nothing here is submitted or saved anywhere — this is a sandbox. '
+        "Add anyone in the league to \"acquire,\" pull anyone off your own roster to \"give up,\" "
+        "and see how your positional ranks, overall standing, and multi-year value trajectory would "
+        "shift. Giving up an asset just removes it from the pool here; this tool doesn't try to "
+        "model what the other side of a real trade would look like.</div>"
+    )
+
+    give_pool = build_asset_pool(players, picks, include_teams=[my_team])
+    acquire_pool = build_asset_pool(players, picks, exclude_teams=[my_team], show_team_label=True)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        give_labels = st.multiselect(
+            "Players/picks you'd give up", list(give_pool.keys()), key="lab_give"
+        )
+    with c2:
+        acquire_labels = st.multiselect(
+            "Players/picks you'd acquire", list(acquire_pool.keys()), key="lab_acquire"
+        )
+
+    if st.button("Reset simulation"):
+        st.session_state["lab_give"] = []
+        st.session_state["lab_acquire"] = []
+        st.rerun()
+
+    give_assets = labels_to_assets(give_labels, give_pool)
+    acquire_assets = labels_to_assets(acquire_labels, acquire_pool)
+    has_moves = bool(give_assets or acquire_assets)
+
+    if has_moves:
+        give_value = package_value(give_assets)
+        acquire_value = package_value(acquire_assets)
+        render_html(
+            f'<div class="gm-card">Sending {give_value:,} value, receiving {acquire_value:,} value '
+            f"&mdash; net {acquire_value - give_value:+,}.</div>"
+        )
+
+    players_mod, picks_mod = apply_roster_moves(players, picks, my_team, give_assets, acquire_assets)
+    teams_mod = build_teams(players_mod, picks_mod)
+
+    current_row = teams[teams["Team"] == my_team].iloc[0]
+    projected_row = teams_mod[teams_mod["Team"] == my_team].iloc[0]
+
+    st.markdown("### Before vs. After")
+    cols = st.columns(2)
+    for col, row, label in zip(cols, [current_row, projected_row], ["Current", "Projected"]):
+        with col:
+            render_html(
+                f'<div class="gm-card"><b>{clean(label)}</b><br>'
+                f'Overall Rank: #{int(row["Overall_Rank"])} · Window: {clean(row["Window"])}<br>'
+                f'Total Value: {int(row["Total_Value"]):,} '
+                f'(Players {int(row["Player_Value"]):,} + Picks {int(row["Pick_Value"]):,})<br>'
+                f'Avg Age: {row["Avg_Age"]}<br>'
+                f'QB #{int(row["QB_Rank"])} · RB #{int(row["RB_Rank"])} · '
+                f'WR #{int(row["WR_Rank"])} · TE #{int(row["TE_Rank"])}'
+                f'</div>'
+            )
+
+    if has_moves:
+        rank_delta = int(current_row["Overall_Rank"]) - int(projected_row["Overall_Rank"])
+        if rank_delta > 0:
+            st.caption(f"This move improves your overall rank by {rank_delta} spot(s) league-wide.")
+        elif rank_delta < 0:
+            st.caption(f"This move drops your overall rank by {abs(rank_delta)} spot(s) league-wide.")
+        else:
+            st.caption("This move leaves your overall rank unchanged league-wide.")
+
+    st.markdown("### Multi-Year Outlook")
+    st.caption(
+        "A simplified dynasty aging curve: RBs decline fastest after their mid-20s, WR/TE erode more "
+        "gradually, QBs hold value longest, and players still climbing toward their positional peak "
+        "age gain value. This is directional planning, not a statistical forecast — real outcomes "
+        "depend on landing spot, injuries, and scheme fit in ways no formula captures."
+    )
+    years = ["Now", "+1 yr", "+2 yrs", "+3 yrs"]
+    chart_df = pd.DataFrame(
+        {
+            "Year": years,
+            "Current Roster": project_roster_trajectory(players, my_team),
+            "Projected Roster": project_roster_trajectory(players_mod, my_team),
+        }
+    ).set_index("Year")
+    st.line_chart(chart_df)
+
+    with st.expander("Projected roster (full list)"):
+        st.dataframe(
+            players_mod[players_mod["Team"] == my_team][
+                ["Player", "Position", "NFL Team", "Age", "Value"]
+            ].sort_values("Value", ascending=False),
+            hide_index=True,
+            use_container_width=True,
+        )
 
 
 def render_trade_intelligence(
@@ -2601,7 +2833,7 @@ def main() -> None:
     st.sidebar.markdown("## 🏈 Front Office")
     page = st.sidebar.radio(
         "Navigation",
-        ["My Team", "League", "Rankings", "Team Needs", "Trade Centre", "Draft Capital", "Draft History", "Mock Draft"],
+        ["My Team", "League", "Rankings", "Team Needs", "Trade Centre", "Roster Lab", "Draft Capital", "Draft History", "Mock Draft"],
         label_visibility="collapsed",
     )
     st.sidebar.markdown("---")
@@ -2633,6 +2865,8 @@ def main() -> None:
         render_team_needs(teams, players, picks)
     elif page == "Trade Centre":
         render_trade_intelligence(teams, players, picks)
+    elif page == "Roster Lab":
+        render_roster_lab(teams, players, picks)
     elif page == "Draft Capital":
         render_draft(picks, teams)
     elif page == "Draft History":
