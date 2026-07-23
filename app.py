@@ -747,12 +747,17 @@ def build_picks(bundle: dict[str, Any]) -> pd.DataFrame:
         for r in bundle["rosters"]
     }
     current_season = int(league.get("season") or 2026)
-    rounds = int((league.get("settings") or {}).get("draft_rounds") or 3)
+    base_rounds = int((league.get("settings") or {}).get("draft_rounds") or 3)
 
     traded_seasons = {
         int(pick.get("season"))
         for pick in bundle["traded_picks"]
         if str(pick.get("season", "")).isdigit()
+    }
+    traded_rounds = {
+        int(pick.get("round"))
+        for pick in bundle["traded_picks"]
+        if str(pick.get("round", "")).isdigit()
     }
     # Always show the current three-year horizon, while also retaining any
     # additional seasons already represented in Sleeper traded-pick records.
@@ -760,6 +765,11 @@ def build_picks(bundle: dict[str, Any]) -> pd.DataFrame:
         {current_season, current_season + 1, current_season + 2}
         | traded_seasons
     )
+    # A trade can reference a round beyond the league's current draft_rounds
+    # setting (e.g. a 4th/5th-round rookie pick changing hands even though
+    # the league currently runs a 3-round draft) — the grid needs to cover
+    # whichever is larger, or that pick silently has nowhere to land.
+    rounds = max(base_rounds, max(traded_rounds, default=0))
 
     ownership: dict[tuple[int, int, int], int] = {}
     for season in seasons:
@@ -770,10 +780,12 @@ def build_picks(bundle: dict[str, Any]) -> pd.DataFrame:
     for pick in bundle["traded_picks"]:
         try:
             key = (int(pick["season"]), int(pick["round"]), int(pick["roster_id"]))
-            if key in ownership:
-                ownership[key] = int(pick["owner_id"])
+            owner = int(pick["owner_id"])
         except (KeyError, TypeError, ValueError):
             continue
+        # Apply every real trade unconditionally — don't require the key to
+        # already exist in the grid, or genuine trades silently vanish.
+        ownership[key] = owner
 
     year_factor = {current_season: 1.0, current_season + 1: 0.88, current_season + 2: 0.76}
     round_base = {1: 4300, 2: 1800, 3: 800, 4: 350, 5: 150}
