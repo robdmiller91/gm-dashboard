@@ -1661,11 +1661,18 @@ def build_asset_pool(
         }
     for _, row in pool_picks.sort_values(["Season", "Round"]).iterrows():
         label = f'{int(row["Season"])} R{int(row["Round"])}'
+        # A team can own more than one pick in the same season/round (their own
+        # plus one or more acquired via trade) — without this, those picks
+        # generate identical dict keys and silently collide, dropping all but
+        # the last one.
+        if row["Traded"]:
+            label += f' (via {row["Original Team"]})'
         suffix = f' · {row["Current Owner"]}' if show_team_label else ""
         key = f'{label} · Pick · {int(row["Value"]):,}{suffix}'
         assets[key] = {
             "label": label, "value": int(row["Value"]), "type": "pick",
             "team": row["Current Owner"], "season": int(row["Season"]), "round": int(row["Round"]),
+            "original_team": row["Original Team"],
         }
     return assets
 
@@ -1698,6 +1705,7 @@ def apply_roster_moves(
                     (picks_mod["Current Owner"] == my_team)
                     & (picks_mod["Season"] == a["season"])
                     & (picks_mod["Round"] == a["round"])
+                    & (picks_mod["Original Team"] == a["original_team"])
                 )
             ]
 
@@ -1710,7 +1718,8 @@ def apply_roster_moves(
             picks_mod.loc[
                 (picks_mod["Current Owner"] == a["team"])
                 & (picks_mod["Season"] == a["season"])
-                & (picks_mod["Round"] == a["round"]),
+                & (picks_mod["Round"] == a["round"])
+                & (picks_mod["Original Team"] == a["original_team"]),
                 "Current Owner",
             ] = my_team
 
