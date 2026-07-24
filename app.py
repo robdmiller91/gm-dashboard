@@ -190,6 +190,22 @@ st.markdown(
       margin-top:.35rem;
       font-size:.72rem;
     }
+    .pick-bg{background:var(--pick)}
+    .player-card-value {
+      margin-top:.35rem;
+      font-size:.78rem;
+      font-weight:900;
+      color:var(--text);
+    }
+    .player-card-sub {
+      margin-top:.2rem;
+      font-size:.66rem;
+      font-weight:700;
+      color:var(--muted);
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
     .pos-pill {
       padding:.15rem .35rem;
       border-radius:6px;
@@ -1406,8 +1422,11 @@ def render_brand(title: str, subtitle: str) -> None:
     )
 
 
-def render_player_card(row: pd.Series) -> str:
+def render_player_card(row: pd.Series, show_value: bool = False) -> str:
     position_rank = "—" if pd.isna(row["Position Rank"]) else int(row["Position Rank"])
+    value_line = (
+        f'<div class="player-card-value">{int(row["Value"]):,}</div>' if show_value else ""
+    )
     return f"""
     <div class="player-card">
       <div class="player-status {status_class(row["Status"])}">{clean(row["Status"])}</div>
@@ -1421,6 +1440,32 @@ def render_player_card(row: pd.Series) -> str:
           <span class="pos-pill {pos_class(row["Position"])}">{clean(row["Position"])}</span>
           <span class="rank-chip">{position_rank}</span>
         </div>
+        {value_line}
+      </div>
+    </div>
+    """
+
+
+def render_pick_card(row: pd.Series) -> str:
+    """Same size/shape as a player card, for displaying an owned draft pick."""
+    label = f'{int(row["Season"])} · Round {int(row["Round"])}'
+    traded_line = (
+        f'<div class="player-card-sub">via {clean(row["Original Team"])}</div>'
+        if row.get("Traded") else ""
+    )
+    return f"""
+    <div class="player-card">
+      <div class="player-status pick">{int(row["Season"])}</div>
+      <div class="player-photo pick-photo">
+        <img src="https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png">
+      </div>
+      <div class="player-card-body">
+        <div class="player-card-name">Round {int(row["Round"])}</div>
+        <div class="player-card-meta">
+          <span class="pos-pill pick-bg">PICK</span>
+          <span class="rank-chip">{int(row["Value"]):,}</span>
+        </div>
+        {traded_line}
       </div>
     </div>
     """
@@ -1822,10 +1867,16 @@ def render_team_blueprint(
 
     render_html('<div class="section-title"><h3>Roster</h3></div>')
     roster = players[players["Team"] == team].sort_values(["Status", "Value"], ascending=[True, False])
-    rcols = st.columns(4)
-    for col, pos, color_class in zip(rcols, ["QB", "RB", "WR", "TE"], ["qb-bg", "rb-bg", "wr-bg", "te-bg"]):
-        with col:
-            render_position_column(roster, pos, pos_ranks[pos], color_class)
+    for pos, rank_col in [("QB", "QB_Rank"), ("RB", "RB_Rank"), ("WR", "WR_Rank"), ("TE", "TE_Rank")]:
+        pos_players = roster[roster["Position"] == pos]
+        if pos_players.empty:
+            continue
+        render_html(
+            f'<div class="position-header {pos.lower()}-bg"><span>{clean(pos)}</span>'
+            f'<span>Rank #{int(row[rank_col])}</span></div>'
+        )
+        cards = "".join(render_player_card(r, show_value=True) for _, r in pos_players.iterrows())
+        render_html(f'<div class="roster-strip">{cards}</div>')
 
     st.divider()
     col3, col4 = st.columns(2)
@@ -1899,43 +1950,41 @@ def render_team_blueprint(
         f'<div class="gradient-scale-labels"><span>Contend</span><span>Rebuild</span></div></div>'
     )
 
+    render_html('<div class="section-title"><h3>Draft Capital — Next 3 Years</h3></div>')
+    current_season = int(bundle["league"].get("season") or picks["Season"].min())
+    upcoming_seasons = [s for s in sorted(picks["Season"].unique()) if s >= current_season][:3]
+    my_picks = picks[(picks["Current Owner"] == team) & (picks["Season"].isin(upcoming_seasons))]
+    if my_picks.empty:
+        st.info("No picks currently owned in the next three seasons.")
+    else:
+        for season in upcoming_seasons:
+            season_picks = my_picks[my_picks["Season"] == season].sort_values("Round")
+            if season_picks.empty:
+                continue
+            render_html(f'<div class="section-title"><h4>{int(season)}</h4></div>')
+            cards = "".join(render_pick_card(r) for _, r in season_picks.iterrows())
+            render_html(f'<div class="roster-strip">{cards}</div>')
+    render_html(
+        f'<div class="gm-card" style="margin-top:.4rem">Draft capital ranks '
+        f'<b>#{int(row["Pick_Rank"])}</b> of {total_teams} league-wide.</div>'
+    )
+
     st.divider()
-    col5, col6 = st.columns(2)
-    with col5:
-        st.markdown("#### Draft Capital")
-        my_picks = picks[picks["Current Owner"] == team].sort_values(["Season", "Round"])
-        if my_picks.empty:
-            st.info("No picks currently owned.")
-        else:
-            for season in sorted(my_picks["Season"].unique()):
-                season_rounds = my_picks[my_picks["Season"] == season].sort_values("Round")
-                labels_str = ", ".join(f"R{int(r)}" for r in season_rounds["Round"])
+    st.markdown("#### Cornerstone Assets")
+    st.caption("Elite, still-young assets — adjust the threshold in Trade Centre.")
+    untouchables = compute_untouchables(players)
+    my_cornerstones = players[(players["Team"] == team) & (players["Player"].isin(untouchables))]
+    if my_cornerstones.empty:
+        st.info("No player currently clears the untouchable bar for this team.")
+    else:
+        for pos in ["QB", "RB", "WR", "TE"]:
+            names = my_cornerstones[my_cornerstones["Position"] == pos]["Player"].tolist()
+            if names:
                 render_html(
                     '<div class="dash-list-row"><div class="dash-list-main">'
-                    f'<div class="dash-list-name">{int(season)}</div>'
-                    f'<div class="dash-list-sub">{clean(labels_str)}</div></div></div>'
+                    f'<div class="dash-list-name">{clean(pos)}</div>'
+                    f'<div class="dash-list-sub">{clean(", ".join(names))}</div></div></div>'
                 )
-        render_html(
-            f'<div class="gm-card" style="margin-top:.6rem">Draft capital ranks '
-            f'<b>#{int(row["Pick_Rank"])}</b> of {total_teams} league-wide.</div>'
-        )
-
-    with col6:
-        st.markdown("#### Cornerstone Assets")
-        st.caption("Elite, still-young assets — adjust the threshold in Trade Centre.")
-        untouchables = compute_untouchables(players)
-        my_cornerstones = players[(players["Team"] == team) & (players["Player"].isin(untouchables))]
-        if my_cornerstones.empty:
-            st.info("No player currently clears the untouchable bar for this team.")
-        else:
-            for pos in ["QB", "RB", "WR", "TE"]:
-                names = my_cornerstones[my_cornerstones["Position"] == pos]["Player"].tolist()
-                if names:
-                    render_html(
-                        '<div class="dash-list-row"><div class="dash-list-main">'
-                        f'<div class="dash-list-name">{clean(pos)}</div>'
-                        f'<div class="dash-list-sub">{clean(", ".join(names))}</div></div></div>'
-                    )
 
     st.divider()
     st.markdown("#### Trade Strategy")
