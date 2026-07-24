@@ -2348,7 +2348,7 @@ def render_draft(picks: pd.DataFrame, teams: pd.DataFrame) -> None:
 DEVY_PROSPECTS_PATH = "devy_prospects.csv"
 
 
-def render_draft_history(bundle: dict[str, Any], players: pd.DataFrame) -> None:
+def render_draft_history(bundle: dict[str, Any]) -> None:
     render_brand("Draft History", "Review past draft results, round by round")
 
     league_id = str(bundle["league"].get("league_id") or LEAGUE_ID)
@@ -2368,14 +2368,12 @@ def render_draft_history(bundle: dict[str, Any], players: pd.DataFrame) -> None:
         st.info(f"No draft picks were found for the {chosen} season.")
         return
 
-    # Current roster owner for every player, so we can flag anyone who's
-    # since been traded away from the team that originally drafted them.
-    current_team_by_id = dict(zip(players["Sleeper ID"].astype(str), players["Team"]))
-
     rounds = sorted(board["Round"].unique())
     slots = sorted(board["Slot"].unique())
+    # Columns are the original owner of that draft slot — the team whose
+    # turn it was, regardless of whether they later traded the pick away.
     slot_team = {
-        s: board[board["Slot"] == s].sort_values("Round").iloc[0]["Team"]
+        s: board[board["Slot"] == s].sort_values("Round").iloc[0]["Original Team"]
         for s in slots
     }
     total_teams = len(slots)
@@ -2393,10 +2391,12 @@ def render_draft_history(bundle: dict[str, Any], players: pd.DataFrame) -> None:
             r = cell.iloc[0]
             pick_in_round = int(r["Pick No"]) - (int(rnd) - 1) * total_teams
 
-            current_team = current_team_by_id.get(str(r["Sleeper ID"]))
+            # If this pick was traded away before the draft, the column still
+            # belongs to the original owner, but the arrow shows who actually
+            # made the selection (they held the pick by draft day).
             arrow = (
-                f'<div class="draftboard-arrow">→ {clean(current_team)}</div>'
-                if current_team and current_team != r["Team"] else ""
+                f'<div class="draftboard-arrow">→ {clean(r["Team"])}</div>'
+                if r["Traded"] else ""
             )
 
             body += (
@@ -2421,14 +2421,17 @@ def render_draft_history(bundle: dict[str, Any], players: pd.DataFrame) -> None:
     )
 
     st.caption(
-        "Scroll horizontally to see every team. Columns show who made each pick that season. "
-        "The → arrow means that player has since been traded away to a different roster — "
-        "it points to whoever owns them now."
+        "Scroll horizontally to see every team. Columns show the original owner of each draft slot. "
+        "The → arrow means that pick was traded away before the draft — it points to whoever actually "
+        "made the selection."
     )
 
     with st.expander("View as a table"):
         st.dataframe(
-            board[["Round", "Pick No", "Team", "Player", "Position", "NFL Team", "Is Keeper"]]
+            board[
+                ["Round", "Pick No", "Original Team", "Team", "Traded",
+                 "Player", "Position", "NFL Team", "Is Keeper"]
+            ].rename(columns={"Team": "Actually Drafted By"})
             .sort_values(["Round", "Pick No"]),
             hide_index=True,
             use_container_width=True,
@@ -2891,7 +2894,7 @@ def main() -> None:
     elif page == "Draft Capital":
         render_draft(picks, teams)
     elif page == "Draft History":
-        render_draft_history(bundle, players)
+        render_draft_history(bundle)
     else:
         render_mock_draft(bundle, fc_rows, picks, teams)
 
