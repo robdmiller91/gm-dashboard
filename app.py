@@ -2287,16 +2287,43 @@ def build_draft_board(season_entry: dict[str, Any]) -> pd.DataFrame:
     slot_to_roster = {
         int(k): int(v) for k, v in (draft.get("slot_to_roster_id") or {}).items() if v
     }
+    # Fallback source for original-slot ownership: slot_to_roster_id isn't
+    # guaranteed to be populated on every league/season, but draft_order
+    # (user_id -> 1-indexed slot) usually is, so use it if the primary
+    # source comes up empty.
+    slot_to_team_fallback: dict[int, str] = {}
+    for uid, slot_no in (draft.get("draft_order") or {}).items():
+        try:
+            slot_to_team_fallback[int(slot_no)] = users_map.get(str(uid), str(uid))
+        except (TypeError, ValueError):
+            continue
+
+    # Last resort: if neither slot_to_roster_id nor draft_order is populated
+    # for this season, assume whoever picked in round 1 for a given slot is
+    # that slot's original owner. Imperfect if round 1 itself was traded,
+    # but still better than treating every pick as untraded.
+    if not slot_to_roster and not slot_to_team_fallback:
+        for p in picks_raw:
+            if int(p.get("round") or 0) != 1:
+                continue
+            s = int(p.get("draft_slot") or 0)
+            rid = p.get("roster_id")
+            if rid is not None:
+                slot_to_team_fallback[s] = roster_owner.get(int(rid), f"Roster {rid}")
 
     rows = []
     for p in picks_raw:
         meta = p.get("metadata") or {}
         slot = int(p.get("draft_slot") or 0)
         roster_id = p.get("roster_id")
+        picked_team = roster_owner.get(int(roster_id), f"Roster {roster_id}") if roster_id else "Unknown"
+
         original_roster = slot_to_roster.get(slot)
         original_team = roster_owner.get(original_roster) if original_roster else None
-        picked_team = roster_owner.get(int(roster_id), f"Roster {roster_id}") if roster_id else "Unknown"
-        traded = bool(original_roster) and roster_id is not None and int(roster_id) != original_roster
+        if not original_team:
+            original_team = slot_to_team_fallback.get(slot)
+        original_team = original_team or picked_team
+        traded = original_team != picked_team
 
         name = f"{meta.get('first_name', '')} {meta.get('last_name', '')}".strip()
         sleeper_id = p.get("player_id")
@@ -2306,7 +2333,7 @@ def build_draft_board(season_entry: dict[str, Any]) -> pd.DataFrame:
                 "Slot": slot,
                 "Pick No": int(p.get("pick_no") or 0),
                 "Team": picked_team,
-                "Original Team": original_team or picked_team,
+                "Original Team": original_team,
                 "Traded": traded,
                 "Player": name or meta.get("player_id", "Unknown"),
                 "Position": meta.get("position") or "",
