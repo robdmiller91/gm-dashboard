@@ -1870,19 +1870,26 @@ def render_team_blueprint(
     st.markdown("#### Positional Grades")
     grade_cols = st.columns(6)
     grade_defs = [
-        ("QB", grade_from_rank(int(row["QB_Rank"]), total_teams), "var(--qb)"),
-        ("RB", grade_from_rank(int(row["RB_Rank"]), total_teams), "var(--rb)"),
-        ("WR", grade_from_rank(int(row["WR_Rank"]), total_teams), "var(--wr)"),
-        ("TE", grade_from_rank(int(row["TE_Rank"]), total_teams), "var(--te)"),
-        ("PICKS", grade_from_rank(int(row["Pick_Rank"]), total_teams), "#f5b942"),
-        ("OVERALL", grade_from_rank(int(row["Overall_Rank"]), total_teams), "#e5e7eb"),
+        ("QB", grade_from_rank(int(row["QB_Rank"]), total_teams), int(row["QB_Rank"]), "var(--qb)"),
+        ("RB", grade_from_rank(int(row["RB_Rank"]), total_teams), int(row["RB_Rank"]), "var(--rb)"),
+        ("WR", grade_from_rank(int(row["WR_Rank"]), total_teams), int(row["WR_Rank"]), "var(--wr)"),
+        ("TE", grade_from_rank(int(row["TE_Rank"]), total_teams), int(row["TE_Rank"]), "var(--te)"),
+        ("PICKS", grade_from_rank(int(row["Pick_Rank"]), total_teams), int(row["Pick_Rank"]), "#f5b942"),
+        ("OVERALL", grade_from_rank(int(row["Overall_Rank"]), total_teams), int(row["Overall_Rank"]), "#e5e7eb"),
     ]
-    for col, (label, grade, color) in zip(grade_cols, grade_defs):
+    for col, (label, grade, rank, color) in zip(grade_cols, grade_defs):
         with col:
             render_html(
                 f'<div class="grade-wrap"><div class="grade-circle" style="background:{color}">{grade}</div>'
-                f'<div class="grade-label">{clean(label)}</div></div>'
+                f'<div class="grade-label">{clean(label)}</div>'
+                f'<div class="grade-label" style="opacity:.7;font-weight:700">#{rank} of {total_teams}</div></div>'
             )
+    st.caption(
+        "Overall isn't an average of the position grades — it's your rank by total dollar value "
+        "(all positions + picks summed). Positions carry very different total value pools "
+        "league-wide, so being moderately behind in one big-dollar position can outweigh being "
+        "strong in several smaller ones."
+    )
 
     st.markdown("#### Contend ↔ Rebuild Scale")
     marker_pos = WINDOW_SCALE_POS.get(row["Window"], 50)
