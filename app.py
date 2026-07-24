@@ -843,6 +843,84 @@ st.markdown(
       flex-shrink:0;
       white-space:nowrap;
     }
+    .blueprint-chip-row {
+      display:flex;
+      gap:.5rem;
+      flex-wrap:wrap;
+      margin-bottom:.8rem;
+    }
+    .blueprint-chip {
+      background:var(--panel2);
+      border:1px solid var(--border);
+      border-radius:10px;
+      padding:.4rem .8rem;
+      text-align:center;
+      min-width:76px;
+    }
+    .blueprint-chip-label {
+      font-size:.6rem;
+      color:var(--muted);
+      font-weight:800;
+      text-transform:uppercase;
+    }
+    .blueprint-chip-value { font-size:1rem; font-weight:900; margin-top:.1rem; }
+    .grade-wrap { text-align:center; }
+    .grade-circle {
+      width:60px;
+      height:60px;
+      border-radius:50%;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      font-size:1.25rem;
+      font-weight:900;
+      color:#081018;
+      margin:0 auto;
+    }
+    .grade-label {
+      font-size:.64rem;
+      color:var(--muted);
+      font-weight:800;
+      margin-top:.35rem;
+      text-transform:uppercase;
+    }
+    .gradient-scale-wrap { padding:1.4rem .8rem .6rem; }
+    .gradient-scale-track {
+      height:14px;
+      border-radius:999px;
+      background:linear-gradient(90deg, #3ddc84, #4d9fff, #f5b942, #ff6b6b);
+      position:relative;
+    }
+    .gradient-scale-marker {
+      position:absolute;
+      top:-7px;
+      width:28px;
+      height:28px;
+      border-radius:50%;
+      background:var(--panel);
+      border:3px solid #081018;
+      transform:translateX(-50%);
+    }
+    .gradient-scale-labels {
+      display:flex;
+      justify-content:space-between;
+      font-size:.66rem;
+      color:var(--muted);
+      font-weight:800;
+      margin-top:.4rem;
+      text-transform:uppercase;
+    }
+    .outlook-row { display:flex; gap:.5rem; }
+    .outlook-chip {
+      flex:1;
+      text-align:center;
+      background:var(--panel2);
+      border:1px solid var(--border);
+      border-radius:10px;
+      padding:.5rem .3rem;
+    }
+    .outlook-chip-year { font-size:.62rem; color:var(--muted); font-weight:800; }
+    .outlook-chip-label { font-size:.85rem; font-weight:900; margin-top:.15rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -1690,6 +1768,210 @@ def render_team_review(
 
 
 
+def render_team_blueprint(
+    bundle: dict[str, Any], teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame
+) -> None:
+    render_brand(
+        "Team Blueprint",
+        "Your full team profile in one place — archetype, grades, cornerstones, and trade strategy",
+    )
+
+    team_names = teams["Team"].tolist()
+    default_team = find_my_team(team_names) or team_names[0]
+    team = st.selectbox(
+        "Team", team_names, index=team_names.index(default_team), key="blueprint_team"
+    )
+    total_teams = len(team_names)
+    row = teams[teams["Team"] == team].iloc[0]
+
+    league = bundle["league"]
+    scoring = league.get("scoring_settings") or {}
+    roster_positions = league.get("roster_positions") or []
+    is_sf = "SUPER_FLEX" in roster_positions
+    ppr = scoring.get("rec", 0)
+    tep = scoring.get("bonus_rec_te", 0)
+
+    chips = [("TEAMS", total_teams), ("SF", "YES" if is_sf else "NO"), ("PPR", f"{ppr:g}"), ("TEP", f"{tep:g}")]
+    render_html(
+        '<div class="blueprint-chip-row">'
+        + "".join(
+            f'<div class="blueprint-chip"><div class="blueprint-chip-label">{clean(l)}</div>'
+            f'<div class="blueprint-chip-value">{clean(v)}</div></div>'
+            for l, v in chips
+        )
+        + '</div>'
+    )
+
+    pos_ranks = {
+        "QB": int(row["QB_Rank"]), "RB": int(row["RB_Rank"]),
+        "WR": int(row["WR_Rank"]), "TE": int(row["TE_Rank"]),
+    }
+    archetype = roster_archetype(pos_ranks)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        render_html(
+            f'<div class="gm-card"><b>Value Archetype</b><br>'
+            f'<span style="font-size:1.3rem;font-weight:900">{clean(row["Window"])}</span></div>'
+        )
+    with col2:
+        render_html(
+            f'<div class="gm-card"><b>Roster Archetype</b><br>'
+            f'<span style="font-size:1.3rem;font-weight:900">{clean(archetype)}</span></div>'
+        )
+
+    render_html('<div class="section-title"><h3>Roster</h3></div>')
+    roster = players[players["Team"] == team].sort_values(["Status", "Value"], ascending=[True, False])
+    rcols = st.columns(4)
+    for col, pos, color_class in zip(rcols, ["QB", "RB", "WR", "TE"], ["qb-bg", "rb-bg", "wr-bg", "te-bg"]):
+        with col:
+            render_position_column(roster, pos, pos_ranks[pos], color_class)
+
+    st.divider()
+    col3, col4 = st.columns(2)
+    with col3:
+        st.markdown("#### Value Share")
+        st.caption("Share of total league-wide dynasty value.")
+        pct, rank = value_share(teams, team, "Total_Value")
+        render_html(
+            f'<div class="gm-card"><div style="font-size:1.6rem;font-weight:900">{pct:.1f}%</div>'
+            f'League rank #{rank} of {total_teams}.</div>'
+        )
+    with col4:
+        st.markdown("#### Starter Value Share")
+        st.caption("Share of league-wide value coming from your STARTING lineup only.")
+        starter_totals = (
+            players[players["Status"] == "Starter"].groupby("Team")["Value"].sum()
+            .reindex(teams["Team"], fill_value=0)
+        )
+        total_starter_value = starter_totals.sum()
+        my_starter_value = starter_totals.get(team, 0)
+        pct2 = round(my_starter_value / total_starter_value * 100, 1) if total_starter_value else 0.0
+        rank2 = int(starter_totals.rank(ascending=False, method="min").get(team, total_teams))
+        render_html(
+            f'<div class="gm-card"><div style="font-size:1.6rem;font-weight:900">{pct2:.1f}%</div>'
+            f'League rank #{rank2} of {total_teams}.</div>'
+        )
+
+    st.markdown("#### Multi-Year Outlook")
+    labels = outlook_labels(players, team)
+    render_html(
+        '<div class="outlook-row">'
+        + "".join(
+            f'<div class="outlook-chip"><div class="outlook-chip-year">Year {i + 1}</div>'
+            f'<div class="outlook-chip-label" style="color:{OUTLOOK_COLORS.get(lbl, "#fff")}">{clean(lbl)}</div></div>'
+            for i, lbl in enumerate(labels)
+        )
+        + '</div>'
+    )
+    st.caption("Same aging-curve heuristic as Roster Lab — directional planning, not a forecast.")
+
+    st.divider()
+    st.markdown("#### Positional Grades")
+    grade_cols = st.columns(6)
+    grade_defs = [
+        ("QB", grade_from_rank(int(row["QB_Rank"]), total_teams), "var(--qb)"),
+        ("RB", grade_from_rank(int(row["RB_Rank"]), total_teams), "var(--rb)"),
+        ("WR", grade_from_rank(int(row["WR_Rank"]), total_teams), "var(--wr)"),
+        ("TE", grade_from_rank(int(row["TE_Rank"]), total_teams), "var(--te)"),
+        ("PICKS", grade_from_rank(int(row["Pick_Rank"]), total_teams), "#f5b942"),
+        ("OVERALL", grade_from_rank(int(row["Overall_Rank"]), total_teams), "#e5e7eb"),
+    ]
+    for col, (label, grade, color) in zip(grade_cols, grade_defs):
+        with col:
+            render_html(
+                f'<div class="grade-wrap"><div class="grade-circle" style="background:{color}">{grade}</div>'
+                f'<div class="grade-label">{clean(label)}</div></div>'
+            )
+
+    st.markdown("#### Contend ↔ Rebuild Scale")
+    marker_pos = WINDOW_SCALE_POS.get(row["Window"], 50)
+    render_html(
+        f'<div class="gradient-scale-wrap"><div class="gradient-scale-track">'
+        f'<div class="gradient-scale-marker" style="left:{marker_pos}%"></div></div>'
+        f'<div class="gradient-scale-labels"><span>Contend</span><span>Rebuild</span></div></div>'
+    )
+
+    st.divider()
+    col5, col6 = st.columns(2)
+    with col5:
+        st.markdown("#### Draft Capital")
+        my_picks = picks[picks["Current Owner"] == team].sort_values(["Season", "Round"])
+        if my_picks.empty:
+            st.info("No picks currently owned.")
+        else:
+            for season in sorted(my_picks["Season"].unique()):
+                season_rounds = my_picks[my_picks["Season"] == season].sort_values("Round")
+                labels_str = ", ".join(f"R{int(r)}" for r in season_rounds["Round"])
+                render_html(
+                    '<div class="dash-list-row"><div class="dash-list-main">'
+                    f'<div class="dash-list-name">{int(season)}</div>'
+                    f'<div class="dash-list-sub">{clean(labels_str)}</div></div></div>'
+                )
+        render_html(
+            f'<div class="gm-card" style="margin-top:.6rem">Draft capital ranks '
+            f'<b>#{int(row["Pick_Rank"])}</b> of {total_teams} league-wide.</div>'
+        )
+
+    with col6:
+        st.markdown("#### Cornerstone Assets")
+        st.caption("Elite, still-young assets — adjust the threshold in Trade Centre.")
+        untouchables = compute_untouchables(players)
+        my_cornerstones = players[(players["Team"] == team) & (players["Player"].isin(untouchables))]
+        if my_cornerstones.empty:
+            st.info("No player currently clears the untouchable bar for this team.")
+        else:
+            for pos in ["QB", "RB", "WR", "TE"]:
+                names = my_cornerstones[my_cornerstones["Position"] == pos]["Player"].tolist()
+                if names:
+                    render_html(
+                        '<div class="dash-list-row"><div class="dash-list-main">'
+                        f'<div class="dash-list-name">{clean(pos)}</div>'
+                        f'<div class="dash-list-sub">{clean(", ".join(names))}</div></div></div>'
+                    )
+
+    st.divider()
+    st.markdown("#### Trade Strategy")
+    strategy = build_trade_strategy(teams, players, team, untouchables)
+    col7, col8 = st.columns(2)
+    with col7:
+        st.markdown("**Look To Trade**")
+        st.caption("Your surplus at strong positions, cornerstones excluded.")
+        if not strategy["look_to_trade"]:
+            st.info("No clear surplus assets right now.")
+        else:
+            render_html(assets_html(strategy["look_to_trade"]))
+    with col8:
+        st.markdown("**Players To Target**")
+        st.caption("Best fits from other rosters at your weak spots, their cornerstones excluded.")
+        if not strategy["targets"]:
+            st.info("No standout targets found.")
+        else:
+            rows_html = "".join(
+                '<div class="dash-list-row"><div class="dash-list-main">'
+                f'<div class="dash-list-name">{clean(a["label"])}</div>'
+                f'<div class="dash-list-sub">{clean(a.get("position", "Pick"))} · '
+                f'{int(a["value"]):,} · from {clean(a["from_team"])}</div></div></div>'
+                for a in strategy["targets"]
+            )
+            render_html(rows_html)
+
+    st.divider()
+    st.markdown("#### Suggestions")
+    strongest = min(pos_ranks, key=pos_ranks.get)
+    weakest = max(pos_ranks, key=pos_ranks.get)
+    pick_rank = int(row["Pick_Rank"])
+    bullets = [
+        f'Elite <b>{clean(strongest)}</b> room (#{pos_ranks[strongest]}) — lean on it as trade '
+        f'leverage rather than a need.',
+        f'Clearest gap is <b>{clean(weakest)}</b> (#{pos_ranks[weakest]}) — prioritize upgrades here.',
+        f'Draft capital ranks #{pick_rank} of {total_teams} — '
+        + ("use it to address needs directly." if pick_rank <= max(total_teams // 2, 1)
+           else "consider packaging picks together for a proven veteran."),
+    ]
+    render_html('<div class="gm-card">' + "<br>".join(f"• {b}" for b in bullets) + '</div>')
+
+
 def render_league_analyzer(
     bundle: dict[str, Any], teams: pd.DataFrame, players: pd.DataFrame
 ) -> None:
@@ -2494,6 +2776,81 @@ def project_roster_trajectory(players: pd.DataFrame, team: str, years: int = 3) 
         )
         trajectory.append(total)
     return trajectory
+
+
+WINDOW_SCALE_POS = {"Contender": 8, "Win-now": 20, "Balanced": 50, "Ascending": 65, "Rebuilding": 90}
+OUTLOOK_COLORS = {"Ascend": "#3ddc84", "Contend": "#4d9fff", "Reload": "#f5b942", "Rebuild": "#ff6b6b"}
+
+
+def grade_from_rank(rank: int, total: int) -> int:
+    """Convert a 1..total league rank into a 1-10 grade (rank 1 -> 10)."""
+    if total <= 1:
+        return 10
+    return max(1, round(10 - (rank - 1) / (total - 1) * 9))
+
+
+def roster_archetype(pos_ranks: dict[str, int]) -> str:
+    """A rough shape label for how concentrated a roster's strength is."""
+    strongest = min(pos_ranks, key=pos_ranks.get)
+    weakest = max(pos_ranks, key=pos_ranks.get)
+    spread = pos_ranks[weakest] - pos_ranks[strongest]
+    if spread <= 3:
+        return "Well Rounded"
+    if pos_ranks[strongest] <= 3 and spread >= 6:
+        return f"{strongest}-Heavy"
+    return "Top Heavy" if pos_ranks[strongest] <= 3 else "Balanced Build"
+
+
+def value_share(teams: pd.DataFrame, team: str, value_col: str = "Total_Value") -> tuple[float, int]:
+    """This team's share of total league-wide value in a given column, and its rank."""
+    total_league_value = teams[value_col].sum()
+    row = teams[teams["Team"] == team].iloc[0]
+    pct = (row[value_col] / total_league_value * 100) if total_league_value else 0.0
+    rank = int(teams[value_col].rank(ascending=False, method="min").loc[row.name])
+    return round(pct, 1), rank
+
+
+def outlook_labels(players: pd.DataFrame, team: str) -> list[str]:
+    """Contend/Ascend/Reload/Rebuild label for each of the next few years, derived from
+    the same aging-curve trajectory used in Roster Lab."""
+    trajectory = project_roster_trajectory(players, team, years=3)
+    base = trajectory[0] if trajectory[0] else 1
+    labels = []
+    for v in trajectory[1:]:
+        ratio = v / base
+        if ratio >= 1.02:
+            labels.append("Ascend")
+        elif ratio >= 0.92:
+            labels.append("Contend")
+        elif ratio >= 0.78:
+            labels.append("Reload")
+        else:
+            labels.append("Rebuild")
+    return labels
+
+
+def build_trade_strategy(
+    teams: pd.DataFrame, players: pd.DataFrame, team: str, untouchables: set[str], top_n: int = 4
+) -> dict[str, list[dict[str, Any]]]:
+    """'Look to trade' (my shoppable surplus at strong positions, cornerstones excluded)
+    and 'players to target' (best fits from other rosters at my weak spots, their
+    cornerstones excluded) — reusing the same logic as Team Needs' mutual fit."""
+    profile = positional_profile(teams, team)
+    strengths = sorted(["QB", "RB", "WR", "TE"], key=lambda p: profile[p])[:2]
+
+    look_to_trade = player_assets(players, team, strengths, exclude=untouchables)[:top_n]
+
+    fits = mutual_fit(teams, players, team, max_offers=2)
+    seen: set[str] = set()
+    targets: list[dict[str, Any]] = []
+    for f in fits:
+        for offer in f["their_offers"]:
+            if offer["label"] in seen:
+                continue
+            seen.add(offer["label"])
+            targets.append({**offer, "from_team": f["Team"]})
+    targets.sort(key=lambda a: -a["value"])
+    return {"look_to_trade": look_to_trade, "targets": targets[:top_n]}
 
 
 def render_custom_trade_builder(
@@ -3842,7 +4199,7 @@ def main() -> None:
     st.sidebar.markdown("## 🏈 Front Office")
     page = st.sidebar.radio(
         "Navigation",
-        ["My Team", "League", "League Analyzer", "Rankings", "Team Needs", "Trade Centre", "Roster Lab", "Draft Capital", "Draft History", "Mock Draft"],
+        ["My Team", "Team Blueprint", "League", "League Analyzer", "Rankings", "Team Needs", "Trade Centre", "Roster Lab", "Draft Capital", "Draft History", "Mock Draft"],
         label_visibility="collapsed",
     )
     st.sidebar.markdown("---")
@@ -3866,6 +4223,8 @@ def main() -> None:
 
     if page == "My Team":
         render_team_review(bundle, teams, players, picks, bundle["league"].get("name", "Weekend Warriors"))
+    elif page == "Team Blueprint":
+        render_team_blueprint(bundle, teams, players, picks)
     elif page == "League":
         render_power_rankings(teams, players, picks)
     elif page == "League Analyzer":
