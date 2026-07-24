@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import math
 import time
 import textwrap
 from typing import Any
@@ -604,6 +605,112 @@ st.markdown(
       object-position:center top;
       display:block;
     }
+    .analyzer-table {
+      border:1px solid var(--border);
+      border-radius:12px;
+      overflow:hidden;
+      margin-bottom:1rem;
+    }
+    .analyzer-row {
+      display:grid;
+      grid-template-columns:50px 1fr 70px;
+      gap:.5rem;
+      align-items:center;
+      padding:.5rem .7rem;
+      background:var(--panel);
+      border-bottom:1px solid var(--border);
+      font-size:.82rem;
+    }
+    .analyzer-row:last-child { border-bottom:none; }
+    .analyzer-head {
+      background:var(--panel2);
+      font-weight:900;
+      font-size:.7rem;
+      color:var(--muted);
+      text-transform:uppercase;
+    }
+    .analyzer-row-selected {
+      background:rgba(59,130,246,.18);
+      font-weight:900;
+    }
+    .rank-bar-row {
+      display:grid;
+      grid-template-columns:56px 1fr 44px;
+      align-items:center;
+      gap:.5rem;
+      padding:.3rem 0;
+      font-size:.78rem;
+    }
+    .rank-bar-track {
+      background:var(--panel2);
+      border-radius:6px;
+      height:18px;
+      overflow:hidden;
+    }
+    .rank-bar-fill {
+      height:100%;
+      border-radius:6px;
+      display:flex;
+      align-items:center;
+      justify-content:flex-end;
+      padding-right:.4rem;
+      box-sizing:border-box;
+    }
+    .tier-good { background:#3ddc84; }
+    .tier-mid { background:#4d9fff; }
+    .tier-bad { background:#ff6b6b; }
+    .lineup-strip {
+      display:flex;
+      flex-wrap:wrap;
+      gap:.5rem;
+    }
+    .lineup-card {
+      width:84px;
+      border:1px solid var(--border);
+      border-radius:12px;
+      background:var(--panel2);
+      padding:.4rem;
+      text-align:center;
+      position:relative;
+    }
+    .lineup-rank {
+      position:absolute;
+      top:.3rem;
+      left:.3rem;
+      font-size:.62rem;
+      font-weight:900;
+      color:#081018;
+      border-radius:999px;
+      padding:.05rem .35rem;
+    }
+    .lineup-photo {
+      width:52px;
+      height:52px;
+      border-radius:10px;
+      overflow:hidden;
+      margin:.2rem auto 0;
+      background:rgba(0,0,0,.18);
+    }
+    .lineup-photo img {
+      width:100%;
+      height:100%;
+      object-fit:cover;
+      object-position:center top;
+    }
+    .lineup-slot {
+      font-size:.62rem;
+      font-weight:900;
+      color:var(--muted);
+      margin-top:.3rem;
+      text-transform:uppercase;
+    }
+    .lineup-name {
+      font-size:.72rem;
+      font-weight:800;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -860,6 +967,145 @@ def find_my_team(names: list[str]) -> str | None:
     return exact or next((x for x in names if "7 toes" in x.casefold()), None)
 
 
+def ordinal(n: int) -> str:
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def tier_class(rank: int, good_max: int, mid_max: int) -> str:
+    if rank <= good_max:
+        return "tier-good"
+    if rank <= mid_max:
+        return "tier-mid"
+    return "tier-bad"
+
+
+def rank_bar_html(label: str, rank: int, total: int) -> str:
+    tier = tier_class(rank, max(1, round(total / 3)), max(1, round(total * 2 / 3)))
+    width = max(6, round((total - rank + 1) / total * 100))
+    return (
+        f'<div class="rank-bar-row"><b>{clean(label)}</b>'
+        f'<div class="rank-bar-track"><div class="rank-bar-fill {tier}" style="width:{width}%"></div></div>'
+        f'<span>{ordinal(rank)}</span></div>'
+    )
+
+
+def positional_value_ranks(players: pd.DataFrame, status: str | None = None) -> pd.DataFrame:
+    """Per-team rank (1=best) at QB/RB/WR/TE, optionally scoped to a roster Status
+    (e.g. "Starter" or "Bench") rather than the whole roster."""
+    pool = players if status is None else players[players["Status"] == status]
+    sums = pool.groupby(["Team", "Position"])["Value"].sum().unstack(fill_value=0)
+    for p in ["QB", "RB", "WR", "TE"]:
+        if p not in sums.columns:
+            sums[p] = 0
+    ranks = sums[["QB", "RB", "WR", "TE"]].rank(ascending=False, method="min").astype(int)
+    return ranks.reset_index()
+
+
+def build_starting_lineup(bundle: dict[str, Any], players: pd.DataFrame, team: str) -> pd.DataFrame:
+    """A team's actual configured starting lineup, in real slot order (QB, RB, RB,
+    WR, WR, TE, FLEX, ..., K, DL, LB, DB — whatever the league is set up as)."""
+    users = {str(u.get("user_id")): team_name(u) for u in bundle["users"]}
+    roster = next(
+        (r for r in bundle["rosters"] if users.get(str(r.get("owner_id"))) == team), None
+    )
+    if not roster:
+        return pd.DataFrame()
+
+    slot_labels = [
+        s for s in (bundle["league"].get("roster_positions") or []) if s not in ("BN", "IR", "TAXI")
+    ]
+    starters = [str(x) for x in (roster.get("starters") or [])]
+    player_by_id = {row["Sleeper ID"]: row for _, row in players.iterrows()}
+
+    rows = []
+    for slot, pid in zip(slot_labels, starters):
+        if not pid or pid == "0":
+            rows.append(
+                {"Slot": slot, "Player": "Empty", "Position": slot, "Value": 0,
+                 "Position Rank": None, "Image": ""}
+            )
+            continue
+        p = player_by_id.get(pid)
+        if p is None:
+            continue
+        rows.append(
+            {
+                "Slot": slot, "Player": p["Player"], "Position": p["Position"],
+                "Value": p["Value"], "Position Rank": p["Position Rank"], "Image": p["Image"],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def lineup_card_html(row: pd.Series, total_teams: int) -> str:
+    has_rank = row["Position"] in {"QB", "RB", "WR", "TE"} and pd.notna(row.get("Position Rank"))
+    if has_rank:
+        rank = int(row["Position Rank"])
+        tier = tier_class(rank, total_teams, total_teams * 2)
+        badge = f'<div class="lineup-rank {tier}">#{rank}</div>'
+    else:
+        badge = '<div class="lineup-rank tier-mid">—</div>'
+    img = row["Image"] or "https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png"
+    return (
+        f'<div class="lineup-card">{badge}'
+        f'<div class="lineup-photo"><img src="{clean(img)}"'
+        f' onerror="this.onerror=null;this.src=\'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png\';"></div>'
+        f'<div class="lineup-slot">{clean(row["Slot"])}</div>'
+        f'<div class="lineup-name">{clean(row["Player"])}</div>'
+        f'</div>'
+    )
+
+
+def radar_svg(
+    categories: list[str], series_a: list[float], series_b: list[float],
+    label_a: str = "Starters", label_b: str = "Bench", size: int = 300,
+) -> str:
+    """A small starters-vs-bench radar chart, hand-drawn as SVG (values 0..1 per axis)."""
+    n = len(categories)
+    cx, cy = size / 2, size / 2
+    radius = size / 2 - 40
+
+    def point(value: float, i: int) -> tuple[float, float]:
+        angle = -math.pi / 2 + i * (2 * math.pi / n)
+        r = radius * max(0.0, min(1.0, value))
+        return cx + r * math.cos(angle), cy + r * math.sin(angle)
+
+    def polygon(vals: list[float], color: str, opacity: float) -> str:
+        pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in (point(v, i) for i, v in enumerate(vals)))
+        return f'<polygon points="{pts}" fill="{color}" fill-opacity="{opacity}" stroke="{color}" stroke-width="2"/>'
+
+    rings = "".join(
+        '<polygon points="'
+        + " ".join(f"{x:.1f},{y:.1f}" for x, y in (point(frac, i) for i in range(n)))
+        + '" fill="none" stroke="var(--border)" stroke-width="1"/>'
+        for frac in [0.25, 0.5, 0.75, 1.0]
+    )
+    axes = "".join(
+        f'<line x1="{cx}" y1="{cy}" x2="{point(1.0, i)[0]:.1f}" y2="{point(1.0, i)[1]:.1f}" '
+        f'stroke="var(--border)" stroke-width="1"/>'
+        for i in range(n)
+    )
+    labels = "".join(
+        f'<text x="{point(1.22, i)[0]:.1f}" y="{point(1.22, i)[1]:.1f}" font-size="12" '
+        f'font-weight="700" fill="var(--muted)" text-anchor="middle" dominant-baseline="middle">'
+        f'{clean(cat)}</text>'
+        for i, cat in enumerate(categories)
+    )
+    bench_poly = polygon(series_b, "#f5b942", 0.30)
+    starter_poly = polygon(series_a, "#3b82f6", 0.42)
+    legend = (
+        f'<circle cx="14" cy="14" r="6" fill="#3b82f6"/><text x="26" y="18" font-size="11" '
+        f'fill="var(--muted)">{clean(label_a)}</text>'
+        f'<circle cx="100" cy="14" r="6" fill="#f5b942"/><text x="112" y="18" font-size="11" '
+        f'fill="var(--muted)">{clean(label_b)}</text>'
+    )
+    return f'<svg viewBox="0 0 {size} {size + 20}" width="100%" height="320">{legend}{rings}{axes}{bench_poly}{starter_poly}{labels}</svg>'
+
+
 def clean(value: Any) -> str:
     return html.escape(str(value))
 
@@ -1052,6 +1298,93 @@ def render_team_review(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.Dat
         """
     )
 
+
+
+def render_league_analyzer(
+    bundle: dict[str, Any], teams: pd.DataFrame, players: pd.DataFrame
+) -> None:
+    render_brand("League Analyzer", "See where your roster stacks up across the whole league")
+
+    team_names = teams["Team"].tolist()
+    default_team = find_my_team(team_names) or team_names[0]
+    team = st.selectbox(
+        "Team", team_names, index=team_names.index(default_team), key="analyzer_team"
+    )
+    total_teams = len(team_names)
+
+    st.caption(
+        "Positional and starter rankings cover QB/RB/WR/TE — the positions FantasyCalc actually "
+        "prices for dynasty value. If your league starts K/DL/LB/DB, those slots still appear in "
+        "Starting Lineup below, just without a fabricated value rank next to them."
+    )
+
+    st.markdown("### Team Power Rankings")
+    lo, hi = teams["Total_Value"].min(), teams["Total_Value"].max()
+    board = teams.sort_values("Overall_Rank").copy()
+    board["Score"] = (100 * (board["Total_Value"] - lo) / max(hi - lo, 1)).round().astype(int)
+    rows_html = "".join(
+        f'<div class="analyzer-row{" analyzer-row-selected" if r["Team"] == team else ""}">'
+        f'<span>#{int(r["Overall_Rank"])}</span><span>{clean(r["Team"])}</span>'
+        f'<span>{int(r["Score"])}</span></div>'
+        for _, r in board.iterrows()
+    )
+    render_html(
+        '<div class="analyzer-table"><div class="analyzer-row analyzer-head">'
+        '<span>RK</span><span>TEAM</span><span>SCORE</span></div>'
+        f'{rows_html}</div>'
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("### Positional Rankings")
+        st.caption("Whole roster, by total dynasty value.")
+        row = teams[teams["Team"] == team].iloc[0]
+        for pos, rank_col in [
+            ("QB", "QB_Rank"), ("RB", "RB_Rank"), ("WR", "WR_Rank"),
+            ("TE", "TE_Rank"), ("PICKS", "Pick_Rank"),
+        ]:
+            render_html(rank_bar_html(pos, int(row[rank_col]), total_teams))
+
+    with col2:
+        st.markdown("### Starter Rankings")
+        st.caption("Starting lineup only, by total dynasty value.")
+        starter_ranks = positional_value_ranks(players, status="Starter")
+        srow = starter_ranks[starter_ranks["Team"] == team]
+        if srow.empty:
+            st.info("No starters are set for this team.")
+        else:
+            srow = srow.iloc[0]
+            for pos in ["QB", "RB", "WR", "TE"]:
+                render_html(rank_bar_html(pos, int(srow[pos]), total_teams))
+
+    col3, col4 = st.columns(2)
+    with col3:
+        st.markdown("### Position Strength")
+        st.caption("League percentile by position — starters vs. bench depth.")
+        starter_ranks_all = positional_value_ranks(players, status="Starter")
+        bench_ranks_all = positional_value_ranks(players, status="Bench")
+
+        def percentile(ranks_df: pd.DataFrame, pos: str) -> float:
+            r = ranks_df[ranks_df["Team"] == team]
+            if r.empty or total_teams <= 1:
+                return 0.5
+            rank = int(r.iloc[0][pos])
+            return (total_teams - rank) / (total_teams - 1)
+
+        cats = ["QB", "RB", "WR", "TE"]
+        starter_pct = [percentile(starter_ranks_all, p) for p in cats]
+        bench_pct = [percentile(bench_ranks_all, p) for p in cats]
+        render_html(radar_svg(cats, starter_pct, bench_pct))
+
+    with col4:
+        st.markdown("### Starting Lineup")
+        st.caption("Your team's actual configured starting slots.")
+        lineup = build_starting_lineup(bundle, players, team)
+        if lineup.empty:
+            st.info("No starting lineup data was found for this team.")
+        else:
+            cards = "".join(lineup_card_html(r, total_teams) for _, r in lineup.iterrows())
+            render_html(f'<div class="lineup-strip">{cards}</div>')
 
 
 def render_power_rankings(
@@ -2884,7 +3217,7 @@ def main() -> None:
     st.sidebar.markdown("## 🏈 Front Office")
     page = st.sidebar.radio(
         "Navigation",
-        ["My Team", "League", "Rankings", "Team Needs", "Trade Centre", "Roster Lab", "Draft Capital", "Draft History", "Mock Draft"],
+        ["My Team", "League", "League Analyzer", "Rankings", "Team Needs", "Trade Centre", "Roster Lab", "Draft Capital", "Draft History", "Mock Draft"],
         label_visibility="collapsed",
     )
     st.sidebar.markdown("---")
@@ -2910,6 +3243,8 @@ def main() -> None:
         render_team_review(teams, players, picks, bundle["league"].get("name", "Weekend Warriors"))
     elif page == "League":
         render_power_rankings(teams, players, picks)
+    elif page == "League Analyzer":
+        render_league_analyzer(bundle, teams, players)
     elif page == "Rankings":
         render_rankings(players)
     elif page == "Team Needs":
