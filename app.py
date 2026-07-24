@@ -1977,14 +1977,16 @@ def render_team_blueprint(
     if my_cornerstones.empty:
         st.info("No player currently clears the untouchable bar for this team.")
     else:
-        for pos in ["QB", "RB", "WR", "TE"]:
-            names = my_cornerstones[my_cornerstones["Position"] == pos]["Player"].tolist()
-            if names:
-                render_html(
-                    '<div class="dash-list-row"><div class="dash-list-main">'
-                    f'<div class="dash-list-name">{clean(pos)}</div>'
-                    f'<div class="dash-list-sub">{clean(", ".join(names))}</div></div></div>'
-                )
+        rows_html = "".join(
+            '<div class="dash-list-row">'
+            f'<img src="{clean(r["Image"])}" '
+            'onerror="this.onerror=null;this.src=\'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png\';">'
+            '<div class="dash-list-main">'
+            f'<div class="dash-list-name">{clean(r["Player"])}</div>'
+            f'<div class="dash-list-sub">{clean(r["Position"])} · {int(r["Value"]):,}</div></div></div>'
+            for _, r in my_cornerstones.sort_values("Value", ascending=False).iterrows()
+        )
+        render_html(rows_html)
 
     st.divider()
     st.markdown("#### Trade Strategy")
@@ -2004,7 +2006,10 @@ def render_team_blueprint(
             st.info("No standout targets found.")
         else:
             rows_html = "".join(
-                '<div class="dash-list-row"><div class="dash-list-main">'
+                '<div class="dash-list-row">'
+                f'<img src="{clean(a.get("image") or "https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png")}" '
+                'onerror="this.onerror=null;this.src=\'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png\';">'
+                '<div class="dash-list-main">'
                 f'<div class="dash-list-name">{clean(a["label"])}</div>'
                 f'<div class="dash-list-sub">{clean(a.get("position", "Pick"))} · '
                 f'{int(a["value"]):,} · from {clean(a["from_team"])}</div></div></div>'
@@ -2473,7 +2478,10 @@ def player_assets(
         owned = owned[~owned["Player"].isin(exclude)]
     owned = owned.sort_values("Value", ascending=False)
     return [
-        {"label": row["Player"], "value": int(row["Value"]), "type": "player", "position": row["Position"]}
+        {
+            "label": row["Player"], "value": int(row["Value"]), "type": "player",
+            "position": row["Position"], "image": row.get("Image", ""),
+        }
         for _, row in owned.iterrows()
         if int(row["Value"]) > 0
     ]
