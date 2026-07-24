@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import math
+import random
 import time
 import textwrap
 from typing import Any
@@ -720,6 +721,128 @@ st.markdown(
       margin-top:.3rem;
       text-transform:uppercase;
     }
+    .dash-stat-row {
+      display:flex;
+      gap:.6rem;
+      margin-bottom:1rem;
+      flex-wrap:wrap;
+    }
+    .dash-stat-card {
+      flex:1;
+      min-width:130px;
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:.7rem .9rem;
+    }
+    .dash-stat-label {
+      font-size:.68rem;
+      color:var(--muted);
+      font-weight:800;
+      text-transform:uppercase;
+    }
+    .dash-stat-value {
+      font-size:1.35rem;
+      font-weight:900;
+      margin-top:.2rem;
+    }
+    .matchup-card {
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:14px;
+      padding:1rem;
+    }
+    .matchup-row {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:.6rem;
+    }
+    .matchup-team {
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      gap:.35rem;
+      width:110px;
+      text-align:center;
+    }
+    .matchup-team img {
+      width:48px;
+      height:48px;
+      border-radius:50%;
+      object-fit:cover;
+      background:var(--panel2);
+    }
+    .matchup-score { font-size:1.6rem; font-weight:900; }
+    .matchup-label { font-size:.68rem; color:var(--muted); font-weight:700; }
+    .matchup-vs {
+      width:32px;
+      height:32px;
+      border-radius:50%;
+      background:#081018;
+      color:#fff;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      font-size:.65rem;
+      font-weight:900;
+      flex-shrink:0;
+    }
+    .accuracy-ring {
+      width:120px;
+      height:120px;
+      border-radius:50%;
+      margin:.4rem auto;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+    }
+    .accuracy-ring-inner {
+      width:94px;
+      height:94px;
+      border-radius:50%;
+      background:var(--panel);
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      justify-content:center;
+    }
+    .accuracy-ring-pct { font-size:1.15rem; font-weight:900; }
+    .accuracy-ring-label { font-size:.62rem; color:var(--muted); font-weight:700; }
+    .dash-list-row {
+      display:flex;
+      align-items:center;
+      gap:.6rem;
+      padding:.4rem .1rem;
+      border-bottom:1px solid var(--border);
+      font-size:.78rem;
+    }
+    .dash-list-row:last-child { border-bottom:none; }
+    .dash-list-row img {
+      width:32px;
+      height:32px;
+      border-radius:50%;
+      object-fit:cover;
+      background:var(--panel2);
+      flex-shrink:0;
+    }
+    .dash-list-main { flex:1; min-width:0; }
+    .dash-list-name {
+      font-weight:800;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .dash-list-sub { font-size:.68rem; color:var(--muted); }
+    .dash-list-tag {
+      font-size:.68rem;
+      font-weight:800;
+      padding:.15rem .5rem;
+      border-radius:999px;
+      background:var(--panel2);
+      flex-shrink:0;
+      white-space:nowrap;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -1307,7 +1430,205 @@ def render_summary_cards(row: pd.Series) -> None:
     render_html(f'<div class="summary-grid">{html_cards}</div>')
 
 
-def render_team_review(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame, league_name: str) -> None:
+def render_weekly_dashboard(bundle: dict[str, Any], teams: pd.DataFrame, players: pd.DataFrame, team: str) -> None:
+    league = bundle["league"]
+    league_id = str(league.get("league_id") or LEAGUE_ID)
+    users = {str(u.get("user_id")): team_name(u) for u in bundle["users"]}
+    roster_to_team = {
+        int(r["roster_id"]): users.get(str(r.get("owner_id")), f"Roster {r['roster_id']}")
+        for r in bundle["rosters"]
+    }
+    my_roster = next((r for r in bundle["rosters"] if roster_to_team.get(int(r["roster_id"])) == team), None)
+
+    state = load_nfl_state()
+    season_type = state.get("season_type", "off")
+    current_week = int(state.get("week") or 1)
+    in_season = season_type in {"regular", "post"} and (state.get("season") == league.get("season"))
+    completed_weeks = max(current_week - 1, 0) if season_type == "regular" else (17 if season_type == "post" else 0)
+
+    st.markdown("### Weekly Dashboard")
+    st.caption(
+        "Built from real Sleeper data (standings, matchups, injury flags, trending adds). "
+        "Playoff Odds is our own simulation from real remaining schedule + season scoring, not a "
+        "licensed odds product — treat it as directional, not a guarantee."
+    )
+
+    if not my_roster:
+        st.info("Couldn't find a roster for this team.")
+        return
+    if not in_season:
+        render_html(
+            '<div class="gm-card">The season hasn\'t started yet (or Sleeper doesn\'t have live '
+            "state for it) — standings, matchups, and scoring will populate automatically once "
+            "Week 1 kicks off.</div>"
+        )
+        return
+
+    settings = my_roster.get("settings") or {}
+    wins, losses, ties = int(settings.get("wins") or 0), int(settings.get("losses") or 0), int(settings.get("ties") or 0)
+    weekly_scores = build_weekly_scores(league_id, roster_to_team, completed_weeks)
+    my_scores = weekly_scores[weekly_scores["Team"] == team]
+    avg_pts = my_scores["Points"].mean() if not my_scores.empty else None
+
+    standings_rank = None
+    if not weekly_scores.empty:
+        wins_by_team = {
+            roster_to_team.get(int(r["roster_id"])): int((r.get("settings") or {}).get("wins") or 0)
+            for r in bundle["rosters"]
+        }
+        ranked = sorted(wins_by_team, key=lambda t: -wins_by_team.get(t, 0))
+        if team in ranked:
+            standings_rank = ranked.index(team) + 1
+
+    playoff_odds = simulate_playoff_odds(bundle, weekly_scores, team, current_week) if completed_weeks > 0 else None
+
+    c1, c2, c3, c4 = st.columns(4)
+    for col, label, value in [
+        (c1, "Record", f"{wins}-{losses}" + (f"-{ties}" if ties else "")),
+        (c2, "Avg Points", f"{avg_pts:.1f}" if avg_pts is not None else "—"),
+        (c3, "League Rank", f"#{standings_rank}" if standings_rank else "—"),
+        (c4, "Playoff Odds", f"{playoff_odds:.0f}%" if playoff_odds is not None else "—"),
+    ]:
+        with col:
+            render_html(
+                f'<div class="dash-stat-card"><div class="dash-stat-label">{clean(label)}</div>'
+                f'<div class="dash-stat-value">{clean(value)}</div></div>'
+            )
+
+    colA, colB = st.columns([1.3, 1])
+    with colA:
+        st.markdown("#### This Week's Matchup")
+        info = current_matchup_info(league_id, roster_to_team, my_roster, current_week)
+        if not info or not info.get("opp_team"):
+            render_html('<div class="matchup-card">No matchup found for this week (bye week or playoffs may not include every team).</div>')
+        else:
+            my_pts = info["my_points"]
+            opp_pts = info["opp_points"]
+            my_label = f"{my_pts:.2f}" if my_pts is not None else "0.00"
+            opp_label = f"{opp_pts:.2f}" if opp_pts is not None else "0.00"
+            render_html(
+                f'<div class="matchup-card"><div class="matchup-row">'
+                f'<div class="matchup-team"><div class="matchup-label">{clean(team)}</div>'
+                f'<div class="matchup-score">{my_label}</div></div>'
+                f'<div class="matchup-vs">VS</div>'
+                f'<div class="matchup-team"><div class="matchup-label">{clean(info["opp_team"])}</div>'
+                f'<div class="matchup-score">{opp_label}</div></div>'
+                f'</div></div>'
+            )
+
+        st.markdown("#### Weekly Points — You vs. League Median")
+        if weekly_scores.empty:
+            st.info("No completed weeks yet.")
+        else:
+            median_by_week = weekly_scores.groupby("Week")["Points"].median()
+            chart_df = my_scores.set_index("Week")[["Points"]].rename(columns={"Points": "You"})
+            chart_df["League Median"] = chart_df.index.map(median_by_week)
+            st.line_chart(chart_df)
+
+    with colB:
+        st.markdown("#### Start/Sit Accuracy")
+        acc = compute_start_sit_accuracy(bundle, league_id, my_roster, completed_weeks)
+        if acc is None:
+            st.info("Not enough completed weeks yet to compute this.")
+        else:
+            pct, weeks_counted = acc
+            ring_color = "#3ddc84" if pct >= 90 else ("#4d9fff" if pct >= 75 else "#ff6b6b")
+            render_html(
+                f'<div class="accuracy-ring" style="background:conic-gradient({ring_color} '
+                f'{pct * 3.6:.0f}deg, var(--panel2) 0deg)">'
+                f'<div class="accuracy-ring-inner"><div class="accuracy-ring-pct">{pct:.0f}%</div>'
+                f'<div class="accuracy-ring-label">Optimal</div></div></div>'
+            )
+            st.caption(f"Actual starter points vs. your best possible lineup, averaged over {weeks_counted} completed week(s).")
+
+    st.divider()
+    col5, col6, col7 = st.columns(3)
+
+    with col5:
+        st.markdown("#### Lineup Suggestions")
+        st.caption("Bench players out-scoring a starter at an eligible slot, by season average.")
+        if my_scores.empty or completed_weeks == 0:
+            st.info("Available once there's at least one completed week.")
+        else:
+            roster_rows = players[players["Team"] == team]
+            week_pts_by_player: dict[str, list[float]] = {}
+            for wk in range(1, completed_weeks + 1):
+                for m in load_matchups(league_id, wk):
+                    if int(m.get("roster_id", -1)) != int(my_roster["roster_id"]):
+                        continue
+                    for pid, pts in (m.get("players_points") or {}).items():
+                        week_pts_by_player.setdefault(pid, []).append(float(pts))
+            avg_by_player = {pid: sum(v) / len(v) for pid, v in week_pts_by_player.items() if v}
+            starter_ids = set(str(x) for x in (my_roster.get("starters") or []) if x and x != "0")
+
+            suggestions = []
+            for _, r in roster_rows.iterrows():
+                pid = r["Sleeper ID"]
+                if pid in starter_ids or pid not in avg_by_player:
+                    continue
+                bench_avg = avg_by_player[pid]
+                worse_starters = [
+                    (sid, avg_by_player.get(sid, 0))
+                    for sid in starter_ids
+                    if avg_by_player.get(sid, 0) < bench_avg
+                ]
+                if worse_starters:
+                    weakest_id, weakest_avg = min(worse_starters, key=lambda x: x[1])
+                    weakest_row = roster_rows[roster_rows["Sleeper ID"] == weakest_id]
+                    weakest_name = weakest_row.iloc[0]["Player"] if not weakest_row.empty else "a starter"
+                    suggestions.append((r["Player"], r["Image"], bench_avg, weakest_name, weakest_avg))
+
+            if not suggestions:
+                st.info("No bench players are currently outscoring a starter on average.")
+            else:
+                rows_html = "".join(
+                    f'<div class="dash-list-row"><img src="{clean(img)}" '
+                    f'onerror="this.onerror=null;this.src=\'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png\';">'
+                    f'<div class="dash-list-main"><div class="dash-list-name">{clean(name)}</div>'
+                    f'<div class="dash-list-sub">{avg:.1f} avg vs {clean(weak_name)} ({weak_avg:.1f})</div></div>'
+                    f'</div>'
+                    for name, img, avg, weak_name, weak_avg in sorted(suggestions, key=lambda x: -x[2])[:5]
+                )
+                render_html(rows_html)
+
+    with col6:
+        st.markdown("#### Waiver Targets")
+        st.caption("Trending Sleeper adds league-wide, not currently on any roster here.")
+        waivers = build_waiver_targets(bundle, players)
+        if waivers.empty:
+            st.info("No trending waiver data available right now.")
+        else:
+            rows_html = "".join(
+                f'<div class="dash-list-row"><img src="{clean(r["Image"])}" '
+                f'onerror="this.onerror=null;this.src=\'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png\';">'
+                f'<div class="dash-list-main"><div class="dash-list-name">{clean(r["Player"])}</div>'
+                f'<div class="dash-list-sub">{clean(r["Position"])} · {clean(r["NFL Team"])}</div></div>'
+                f'<span class="dash-list-tag">{int(r["Adds"]):,} adds</span></div>'
+                for _, r in waivers.iterrows()
+            )
+            render_html(rows_html)
+
+    with col7:
+        st.markdown("#### Injury Report")
+        st.caption("Real injury flags from Sleeper for your roster.")
+        injuries = build_injury_report(bundle, players, team)
+        if injuries.empty:
+            st.info("No injury designations on your roster right now.")
+        else:
+            rows_html = "".join(
+                f'<div class="dash-list-row"><img src="{clean(r["Image"])}" '
+                f'onerror="this.onerror=null;this.src=\'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png\';">'
+                f'<div class="dash-list-main"><div class="dash-list-name">{clean(r["Player"])}</div>'
+                f'<div class="dash-list-sub">{clean(r["Position"])}' + (f' · {clean(r["Note"])}' if r["Note"] else '') + '</div></div>'
+                f'<span class="dash-list-tag">{clean(r["Status"])}</span></div>'
+                for _, r in injuries.iterrows()
+            )
+            render_html(rows_html)
+
+
+def render_team_review(
+    bundle: dict[str, Any], teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame, league_name: str
+) -> None:
     render_brand("My Team", "Front-office view of your roster and league position")
     my_team = find_my_team(teams["Team"].tolist()) or teams.iloc[0]["Team"]
     selected = st.selectbox("League / Team", teams["Team"].tolist(), index=teams["Team"].tolist().index(my_team))
@@ -1328,6 +1649,8 @@ def render_team_review(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.Dat
     )
 
     render_summary_cards(row)
+
+    render_weekly_dashboard(bundle, teams, players, selected)
 
     render_html('<div class="section-title"><h3>Roster</h3><span style="color:#98a2b3">Scroll horizontally</span></div>')
     cards = "".join(render_player_card(r) for _, r in roster.head(18).iterrows())
@@ -3003,6 +3326,230 @@ def load_league_drafts(league_id: str) -> list[dict[str, Any]]:
         return []
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_nfl_state() -> dict[str, Any]:
+    try:
+        return get_json(f"{SLEEPER_BASE}/state/nfl")
+    except DataError:
+        return {}
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_matchups(league_id: str, week: int) -> list[dict[str, Any]]:
+    try:
+        return get_json(f"{SLEEPER_BASE}/league/{league_id}/matchups/{week}")
+    except DataError:
+        return []
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_trending_adds(hours: int = 48, limit: int = 50) -> list[dict[str, Any]]:
+    try:
+        return get_json(f"{SLEEPER_BASE}/players/nfl/trending/add?lookback_hours={hours}&limit={limit}")
+    except DataError:
+        return []
+
+
+def build_weekly_scores(league_id: str, roster_to_team: dict[int, str], through_week: int) -> pd.DataFrame:
+    """Real weekly fantasy points per team for every completed week this season."""
+    rows = []
+    for wk in range(1, max(through_week, 0) + 1):
+        for m in load_matchups(league_id, wk):
+            rid, pts = m.get("roster_id"), m.get("points")
+            if rid is None or pts is None:
+                continue
+            rows.append({"Team": roster_to_team.get(int(rid), f"Roster {rid}"), "Week": wk, "Points": float(pts)})
+    return pd.DataFrame(rows)
+
+
+def current_matchup_info(
+    league_id: str, roster_to_team: dict[int, str], my_roster: dict[str, Any], week: int
+) -> dict[str, Any] | None:
+    matchups = load_matchups(league_id, week)
+    if not matchups:
+        return None
+    my_entry = next((m for m in matchups if int(m.get("roster_id", -1)) == int(my_roster["roster_id"])), None)
+    if not my_entry:
+        return None
+    mid = my_entry.get("matchup_id")
+    opp_entry = next(
+        (m for m in matchups if m.get("matchup_id") == mid and int(m.get("roster_id", -1)) != int(my_roster["roster_id"])),
+        None,
+    )
+    return {
+        "my_points": my_entry.get("points"),
+        "opp_points": opp_entry.get("points") if opp_entry else None,
+        "opp_team": roster_to_team.get(int(opp_entry["roster_id"])) if opp_entry else None,
+        "players_points": my_entry.get("players_points") or {},
+    }
+
+
+def compute_optimal_lineup_points(bundle: dict[str, Any], roster: dict[str, Any], week_points: dict[str, float]) -> float | None:
+    """Best possible starting-lineup total that week from the FULL roster, respecting
+    real position eligibility — used as the 'perfect lineup' baseline for Start/Sit Accuracy."""
+    slot_labels = [s for s in (bundle["league"].get("roster_positions") or []) if s not in ("BN", "IR", "TAXI")]
+    if not slot_labels:
+        return None
+    pool = []
+    for pid in (roster.get("players") or []):
+        pid = str(pid)
+        pts = week_points.get(pid)
+        if pts is None:
+            continue
+        meta = bundle["players"].get(pid, {}) or {}
+        pool.append({"id": pid, "points": float(pts), "eligible": set(meta.get("fantasy_positions") or [])})
+    if not pool:
+        return None
+
+    def slot_eligible(slot: str, elig: set[str]) -> bool:
+        if slot in elig:
+            return True
+        if slot == "FLEX":
+            return bool(elig & {"RB", "WR", "TE"})
+        if slot == "SUPER_FLEX":
+            return bool(elig & {"QB", "RB", "WR", "TE"})
+        if slot == "REC_FLEX":
+            return bool(elig & {"WR", "TE"})
+        return False
+
+    # Fill the most position-restrictive slots first (fewest eligible pool members).
+    slot_order = sorted(slot_labels, key=lambda s: sum(1 for p in pool if slot_eligible(s, p["eligible"])))
+    used: set[str] = set()
+    total = 0.0
+    for slot in slot_order:
+        candidates = [p for p in pool if p["id"] not in used and slot_eligible(slot, p["eligible"])]
+        if not candidates:
+            continue
+        best = max(candidates, key=lambda p: p["points"])
+        total += best["points"]
+        used.add(best["id"])
+    return total
+
+
+def compute_start_sit_accuracy(
+    bundle: dict[str, Any], league_id: str, my_roster: dict[str, Any], through_week: int
+) -> tuple[float, int] | None:
+    """Actual starter points vs. the best possible lineup from your full roster,
+    averaged across every completed week this season."""
+    actual_total, optimal_total, weeks_counted = 0.0, 0.0, 0
+    for wk in range(1, max(through_week, 0) + 1):
+        matchups = load_matchups(league_id, wk)
+        entry = next((m for m in matchups if int(m.get("roster_id", -1)) == int(my_roster["roster_id"])), None)
+        if not entry or entry.get("points") is None:
+            continue
+        optimal = compute_optimal_lineup_points(bundle, my_roster, entry.get("players_points") or {})
+        if not optimal or optimal <= 0:
+            continue
+        actual_total += float(entry["points"])
+        optimal_total += optimal
+        weeks_counted += 1
+    if weeks_counted == 0 or optimal_total <= 0:
+        return None
+    return round(actual_total / optimal_total * 100, 1), weeks_counted
+
+
+def simulate_playoff_odds(bundle: dict[str, Any], teams_scores: pd.DataFrame, team: str, current_week: int, trials: int = 300) -> float | None:
+    """A simple Monte Carlo playoff-odds estimate: real remaining schedule, scores drawn
+    from each team's own season-average and variance so far. This is our own simulation,
+    not a licensed odds product — treat it as directional."""
+    settings = bundle["league"].get("settings") or {}
+    playoff_week_start = int(settings.get("playoff_week_start") or 15)
+    playoff_teams_n = int(settings.get("playoff_teams") or 6)
+    league_id = str(bundle["league"].get("league_id") or LEAGUE_ID)
+
+    users = {str(u.get("user_id")): team_name(u) for u in bundle["users"]}
+    roster_to_team = {int(r["roster_id"]): users.get(str(r.get("owner_id")), f"Roster {r['roster_id']}") for r in bundle["rosters"]}
+    all_teams = list(roster_to_team.values())
+    if team not in all_teams:
+        return None
+
+    base_wins = {
+        roster_to_team.get(int(r["roster_id"])): int((r.get("settings") or {}).get("wins") or 0)
+        for r in bundle["rosters"]
+    }
+    stats = teams_scores.groupby("Team")["Points"].agg(["mean", "std"]) if not teams_scores.empty else pd.DataFrame()
+
+    remaining_schedule = []
+    for wk in range(max(current_week, 1), playoff_week_start):
+        matchups = load_matchups(league_id, wk)
+        if not matchups:
+            continue
+        pairs: dict[Any, list[str]] = {}
+        for m in matchups:
+            mid, rid = m.get("matchup_id"), m.get("roster_id")
+            if mid is None or rid is None:
+                continue
+            pairs.setdefault(mid, []).append(roster_to_team.get(int(rid), f"Roster {rid}"))
+        remaining_schedule.append([tuple(v) for v in pairs.values() if len(v) == 2])
+
+    if not remaining_schedule:
+        ranked = sorted(all_teams, key=lambda t: -base_wins.get(t, 0))
+        return 100.0 if team in ranked[:playoff_teams_n] else 0.0
+
+    def team_score(t: str) -> float:
+        mean = stats.loc[t, "mean"] if t in stats.index else 100.0
+        std = max(stats.loc[t, "std"] if t in stats.index else 15.0, 8.0)
+        return random.gauss(mean, std)
+
+    makes_playoffs = 0
+    for _ in range(trials):
+        wins = dict(base_wins)
+        for week_pairs in remaining_schedule:
+            for a, b in week_pairs:
+                if team_score(a) >= team_score(b):
+                    wins[a] = wins.get(a, 0) + 1
+                else:
+                    wins[b] = wins.get(b, 0) + 1
+        ranked = sorted(all_teams, key=lambda t: -wins.get(t, 0))
+        if team in ranked[:playoff_teams_n]:
+            makes_playoffs += 1
+    return round(makes_playoffs / trials * 100, 1)
+
+
+def build_waiver_targets(bundle: dict[str, Any], players: pd.DataFrame, limit: int = 8) -> pd.DataFrame:
+    """League-wide trending Sleeper adds, filtered to players not already rostered here."""
+    trending = load_trending_adds()
+    if not trending:
+        return pd.DataFrame()
+    rostered_ids = set(players["Sleeper ID"].astype(str))
+    rows = []
+    for t in trending:
+        pid = str(t.get("player_id"))
+        if pid in rostered_ids:
+            continue
+        p = bundle["players"].get(pid, {}) or {}
+        if (p.get("position") or "") not in {"QB", "RB", "WR", "TE"}:
+            continue
+        name = p.get("full_name") or " ".join(filter(None, [p.get("first_name"), p.get("last_name")])) or pid
+        rows.append(
+            {
+                "Player": name, "Position": p.get("position"), "NFL Team": p.get("team") or "FA",
+                "Adds": int(t.get("count") or 0), "Image": player_image_url({"player_id": pid}),
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return pd.DataFrame(rows)
+
+
+def build_injury_report(bundle: dict[str, Any], players: pd.DataFrame, team: str) -> pd.DataFrame:
+    """Real injury flags from Sleeper's own player metadata for this team's roster."""
+    roster = players[players["Team"] == team]
+    rows = []
+    for _, r in roster.iterrows():
+        meta = bundle["players"].get(r["Sleeper ID"], {}) or {}
+        status = meta.get("injury_status")
+        if not status:
+            continue
+        rows.append(
+            {
+                "Player": r["Player"], "Position": r["Position"], "Status": status,
+                "Note": meta.get("injury_body_part") or "", "Image": r["Image"],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def official_draft_order(
     drafts: list[dict[str, Any]],
     season: int,
@@ -3318,7 +3865,7 @@ def main() -> None:
         st.stop()
 
     if page == "My Team":
-        render_team_review(teams, players, picks, bundle["league"].get("name", "Weekend Warriors"))
+        render_team_review(bundle, teams, players, picks, bundle["league"].get("name", "Weekend Warriors"))
     elif page == "League":
         render_power_rankings(teams, players, picks)
     elif page == "League Analyzer":
