@@ -162,6 +162,9 @@ st.markdown(
     .bench { background:#2b2811; color:#fde047; }
     .ir { background:#321a1a; color:#fca5a5; }
     .taxi { background:#1d2637; color:#93c5fd; }
+    .cornerstone { background:#5b21b6; color:#e9d5ff; }
+    .target { background:#075985; color:#bae6fd; }
+    .surplus { background:#7c2d12; color:#fed7aa; }
     .player-photo {
       height:105px;
       display:flex;
@@ -1446,6 +1449,41 @@ def render_player_card(row: pd.Series, show_value: bool = False) -> str:
     """
 
 
+def render_asset_player_card(
+    label: str,
+    position: str,
+    value: int,
+    image: str,
+    badge_text: str,
+    badge_class: str,
+    sub_text: str | None = None,
+    position_rank: int | None = None,
+) -> str:
+    """Same player-card shape as the Roster/Draft Capital strips, reused for any
+    list of named players (cornerstones, trade targets, surplus assets)."""
+    rank_display = "—" if position_rank is None or pd.isna(position_rank) else int(position_rank)
+    sub_line = f'<div class="player-card-sub">{clean(sub_text)}</div>' if sub_text else ""
+    fallback = "https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png"
+    return f"""
+    <div class="player-card">
+      <div class="player-status {badge_class}">{clean(badge_text)}</div>
+      <div class="player-photo">
+        <img src="{clean(image or fallback)}"
+             onerror="this.onerror=null;this.src='{fallback}';">
+      </div>
+      <div class="player-card-body">
+        <div class="player-card-name">{clean(label)}</div>
+        <div class="player-card-meta">
+          <span class="pos-pill {pos_class(position)}">{clean(position)}</span>
+          <span class="rank-chip">{rank_display}</span>
+        </div>
+        <div class="player-card-value">{int(value):,}</div>
+        {sub_line}
+      </div>
+    </div>
+    """
+
+
 def render_pick_card(row: pd.Series) -> str:
     """Same size/shape as a player card, for displaying an owned draft pick."""
     label = f'{int(row["Season"])} · Round {int(row["Round"])}'
@@ -1977,16 +2015,14 @@ def render_team_blueprint(
     if my_cornerstones.empty:
         st.info("No player currently clears the untouchable bar for this team.")
     else:
-        rows_html = "".join(
-            '<div class="dash-list-row">'
-            f'<img src="{clean(r["Image"])}" '
-            'onerror="this.onerror=null;this.src=\'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png\';">'
-            '<div class="dash-list-main">'
-            f'<div class="dash-list-name">{clean(r["Player"])}</div>'
-            f'<div class="dash-list-sub">{clean(r["Position"])} · {int(r["Value"]):,}</div></div></div>'
+        cards = "".join(
+            render_asset_player_card(
+                r["Player"], r["Position"], int(r["Value"]), r["Image"],
+                "CORNERSTONE", "cornerstone", position_rank=r.get("Position Rank"),
+            )
             for _, r in my_cornerstones.sort_values("Value", ascending=False).iterrows()
         )
-        render_html(rows_html)
+        render_html(f'<div class="roster-strip">{cards}</div>')
 
     st.divider()
     st.markdown("#### Trade Strategy")
@@ -1998,24 +2034,29 @@ def render_team_blueprint(
         if not strategy["look_to_trade"]:
             st.info("No clear surplus assets right now.")
         else:
-            render_html(assets_html(strategy["look_to_trade"]))
+            cards = "".join(
+                render_asset_player_card(
+                    a["label"], a["position"], a["value"], a.get("image"),
+                    "SURPLUS", "surplus", position_rank=a.get("position_rank"),
+                )
+                for a in strategy["look_to_trade"]
+            )
+            render_html(f'<div class="roster-strip">{cards}</div>')
     with col8:
         st.markdown("**Players To Target**")
         st.caption("Best fits from other rosters at your weak spots, their cornerstones excluded.")
         if not strategy["targets"]:
             st.info("No standout targets found.")
         else:
-            rows_html = "".join(
-                '<div class="dash-list-row">'
-                f'<img src="{clean(a.get("image") or "https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png")}" '
-                'onerror="this.onerror=null;this.src=\'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png\';">'
-                '<div class="dash-list-main">'
-                f'<div class="dash-list-name">{clean(a["label"])}</div>'
-                f'<div class="dash-list-sub">{clean(a.get("position", "Pick"))} · '
-                f'{int(a["value"]):,} · from {clean(a["from_team"])}</div></div></div>'
+            cards = "".join(
+                render_asset_player_card(
+                    a["label"], a.get("position", ""), a["value"], a.get("image"),
+                    "TARGET", "target", sub_text=f'from {a["from_team"]}',
+                    position_rank=a.get("position_rank"),
+                )
                 for a in strategy["targets"]
             )
-            render_html(rows_html)
+            render_html(f'<div class="roster-strip">{cards}</div>')
 
     st.divider()
     st.markdown("#### Suggestions")
@@ -2481,6 +2522,7 @@ def player_assets(
         {
             "label": row["Player"], "value": int(row["Value"]), "type": "player",
             "position": row["Position"], "image": row.get("Image", ""),
+            "position_rank": row.get("Position Rank"),
         }
         for _, row in owned.iterrows()
         if int(row["Value"]) > 0
