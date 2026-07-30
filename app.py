@@ -940,6 +940,42 @@ st.markdown(
     }
     .outlook-chip-year { font-size:.62rem; color:var(--muted); font-weight:800; }
     .outlook-chip-label { font-size:.85rem; font-weight:900; margin-top:.15rem; }
+    .share-card {
+      border-radius:16px;
+      padding:1rem 1.1rem;
+      text-align:center;
+      flex:1;
+    }
+    .share-card.production {
+      background:linear-gradient(160deg, #3b1764, #1a0b33);
+      border:1px solid #7c3aed;
+    }
+    .share-card.value {
+      background:linear-gradient(160deg, #7c2d12, #451a03);
+      border:1px solid #ea580c;
+    }
+    .share-card-icon { font-size:1.3rem; margin-bottom:.15rem; }
+    .share-card-label {
+      font-size:.66rem;
+      font-weight:900;
+      letter-spacing:.05em;
+      color:#e9d5ff;
+      text-transform:uppercase;
+    }
+    .share-card.value .share-card-label { color:#fed7aa; }
+    .share-card-pct {
+      font-size:1.9rem;
+      font-weight:900;
+      color:#fff;
+      margin:.15rem 0;
+    }
+    .share-card-rank {
+      font-size:.64rem;
+      font-weight:800;
+      color:rgba(255,255,255,.7);
+      text-transform:uppercase;
+    }
+    .share-card-row { display:flex; gap:.6rem; margin-bottom:.6rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -2916,6 +2952,72 @@ def value_share(teams: pd.DataFrame, team: str, value_col: str = "Total_Value") 
     return round(pct, 1), rank
 
 
+def optimal_starters_by_value(bundle: dict[str, Any], roster_df: pd.DataFrame) -> set[str]:
+    """Which players on this roster WOULD start, based purely on dynasty value and real
+    slot eligibility (QB/RB/WR/TE + FLEX/SUPER_FLEX/REC_FLEX) from the league's actual
+    roster_positions. Used instead of Sleeper's real Status field so a hypothetical
+    Roster Lab trade can be evaluated the same way before and after — a newly acquired
+    or dropped player doesn't come with a real starter/bench label yet.
+    """
+    slot_labels = [s for s in (bundle["league"].get("roster_positions") or []) if s not in ("BN", "IR", "TAXI")]
+    if not slot_labels:
+        return set(roster_df[roster_df["Status"] == "Starter"]["Player"])
+
+    pool = [
+        {"label": r["Player"], "value": r["Value"], "eligible": {r["Position"]}}
+        for _, r in roster_df.iterrows() if r["Value"] > 0
+    ]
+
+    def slot_eligible(slot: str, elig: set[str]) -> bool:
+        if slot in elig:
+            return True
+        if slot == "FLEX":
+            return bool(elig & {"RB", "WR", "TE"})
+        if slot == "SUPER_FLEX":
+            return bool(elig & {"QB", "RB", "WR", "TE"})
+        if slot == "REC_FLEX":
+            return bool(elig & {"WR", "TE"})
+        return False
+
+    slot_order = sorted(slot_labels, key=lambda s: sum(1 for p in pool if slot_eligible(s, p["eligible"])))
+    used: set[str] = set()
+    for slot in slot_order:
+        candidates = [p for p in pool if p["label"] not in used and slot_eligible(slot, p["eligible"])]
+        if not candidates:
+            continue
+        best = max(candidates, key=lambda p: p["value"])
+        used.add(best["label"])
+    return used
+
+
+def team_optimal_starter_values(bundle: dict[str, Any], players: pd.DataFrame) -> pd.Series:
+    """Total dynasty value in each team's best-possible starting lineup — the basis for
+    a self-consistent Production Share, comparable across teams and before/after a trade."""
+    totals = {}
+    for team in players["Team"].unique():
+        roster_df = players[players["Team"] == team]
+        starters = optimal_starters_by_value(bundle, roster_df)
+        totals[team] = float(roster_df[roster_df["Player"].isin(starters)]["Value"].sum())
+    return pd.Series(totals)
+
+
+def production_share(bundle: dict[str, Any], players: pd.DataFrame, team: str) -> tuple[float, int]:
+    totals = team_optimal_starter_values(bundle, players)
+    total_league = totals.sum()
+    pct = (totals.get(team, 0) / total_league * 100) if total_league else 0.0
+    rank = int(totals.rank(ascending=False, method="min").get(team, len(totals)))
+    return round(pct, 1), rank
+
+
+def share_card_html(label: str, icon: str, pct: float, rank: int, css_class: str) -> str:
+    return (
+        f'<div class="share-card {css_class}"><div class="share-card-icon">{icon}</div>'
+        f'<div class="share-card-label">{clean(label)}</div>'
+        f'<div class="share-card-pct">{pct:.1f}%</div>'
+        f'<div class="share-card-rank">League Rank: #{rank}</div></div>'
+    )
+
+
 def outlook_labels(players: pd.DataFrame, team: str) -> list[str]:
     """Contend/Ascend/Reload/Rebuild label for each of the next few years, derived from
     the same aging-curve trajectory used in Roster Lab."""
@@ -3118,7 +3220,7 @@ def render_team_needs(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.Data
     )
 
 
-def render_roster_lab(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame) -> None:
+def render_roster_lab(bundle: dict[str, Any], teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame) -> None:
     render_brand(
         "Roster Lab",
         "Plug in hypothetical moves and project your roster's rank now — and its trajectory in the coming years",
@@ -3197,6 +3299,35 @@ def render_roster_lab(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.Data
             st.caption(f"This move drops your overall rank by {abs(rank_delta)} spot(s) league-wide.")
         else:
             st.caption("This move leaves your overall rank unchanged league-wide.")
+
+    st.markdown("### Share of League")
+    st.caption(
+        "Value Share = your team's share of total league-wide dynasty value. Production Share = "
+        "share of value concentrated in your best possible starting lineup (real slot eligibility, "
+        "not bench) — a dynasty-value proxy, not real box-score production."
+    )
+    cur_prod_pct, cur_prod_rank = production_share(bundle, players, my_team)
+    cur_val_pct, cur_val_rank = value_share(teams, my_team)
+    proj_prod_pct, proj_prod_rank = production_share(bundle, players_mod, my_team)
+    proj_val_pct, proj_val_rank = value_share(teams_mod, my_team)
+
+    scol1, scol2 = st.columns(2)
+    with scol1:
+        st.markdown("**Current**")
+        render_html(
+            '<div class="share-card-row">'
+            + share_card_html("Production Share", "⚙️", cur_prod_pct, cur_prod_rank, "production")
+            + share_card_html("Value Share", "📈", cur_val_pct, cur_val_rank, "value")
+            + '</div>'
+        )
+    with scol2:
+        st.markdown("**Projected**")
+        render_html(
+            '<div class="share-card-row">'
+            + share_card_html("Production Share", "⚙️", proj_prod_pct, proj_prod_rank, "production")
+            + share_card_html("Value Share", "📈", proj_val_pct, proj_val_rank, "value")
+            + '</div>'
+        )
 
     st.markdown("### Multi-Year Outlook")
     st.caption(
@@ -4342,7 +4473,7 @@ def main() -> None:
     elif page == "Trade Centre":
         render_trade_intelligence(teams, players, picks)
     elif page == "Roster Lab":
-        render_roster_lab(teams, players, picks)
+        render_roster_lab(bundle, teams, players, picks)
     elif page == "Draft Capital":
         render_draft(picks, teams)
     elif page == "Draft History":
