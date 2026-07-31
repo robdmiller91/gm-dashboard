@@ -2062,7 +2062,7 @@ def render_team_blueprint(
 
     st.divider()
     st.markdown("#### Trade Strategy")
-    strategy = build_trade_strategy(teams, players, team, untouchables)
+    strategy = build_trade_strategy(teams, players, picks, team, untouchables)
     col7, col8 = st.columns(2)
     with col7:
         st.markdown("**Look To Trade**")
@@ -2501,22 +2501,27 @@ def league_needs_board(teams: pd.DataFrame) -> pd.DataFrame:
 def mutual_fit(
     teams: pd.DataFrame,
     players: pd.DataFrame,
+    picks: pd.DataFrame,
     my_team: str,
     max_offers: int = 4,
+    include_picks: bool = True,
 ) -> list[dict[str, Any]]:
     """For every other team, work out what each side's roster could do for the other.
 
     'my_offers' are my_team's players at positions where the partner ranks
-    weak — i.e. what I have that could plausibly fill their need. 'their_offers'
-    are the partner's players at positions where my_team ranks weak. This is
-    a needs-fit lens (who has what the other side is missing), not a
-    value-balanced trade proposal like the Trade Centre scenarios. Untouchable
-    cornerstone players are excluded from both sides — a mutual fit isn't
-    realistic if it hinges on someone giving up a player they'd never move.
+    weak — i.e. what I have that could plausibly fill their need — plus my
+    owned draft picks (when include_picks=True), which are real trade currency
+    regardless of position. 'their_offers' is the same idea from the partner's
+    side. This is a needs-fit lens (who has what the other side is missing),
+    not a value-balanced trade proposal like the Trade Centre scenarios.
+    Untouchable cornerstone players are excluded from both sides — a mutual
+    fit isn't realistic if it hinges on someone giving up a player they'd
+    never move.
     """
     untouchables = compute_untouchables(players)
     my_profile = positional_profile(teams, my_team)
     my_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p], reverse=True)
+    my_picks_all = pick_assets(picks, my_team) if include_picks else []
 
     partners = trade_partner_scores(teams, my_team)
     results = []
@@ -2524,9 +2529,13 @@ def mutual_fit(
         partner = r["Team"]
         their_profile = positional_profile(teams, partner)
         their_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: their_profile[p], reverse=True)
+        their_picks_all = pick_assets(picks, partner) if include_picks else []
 
-        my_offers = player_assets(players, my_team, their_needs[:2], exclude=untouchables)[:max_offers]
-        their_offers = player_assets(players, partner, my_needs[:2], exclude=untouchables)[:max_offers]
+        my_players_offer = player_assets(players, my_team, their_needs[:2], exclude=untouchables)
+        their_players_offer = player_assets(players, partner, my_needs[:2], exclude=untouchables)
+
+        my_offers = sorted(my_players_offer + my_picks_all, key=lambda a: -a["value"])[:max_offers]
+        their_offers = sorted(their_players_offer + their_picks_all, key=lambda a: -a["value"])[:max_offers]
 
         results.append(
             {
@@ -3038,7 +3047,8 @@ def outlook_labels(players: pd.DataFrame, team: str) -> list[str]:
 
 
 def build_trade_strategy(
-    teams: pd.DataFrame, players: pd.DataFrame, team: str, untouchables: set[str], top_n: int = 4
+    teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame, team: str,
+    untouchables: set[str], top_n: int = 4,
 ) -> dict[str, list[dict[str, Any]]]:
     """'Look to trade' (my shoppable surplus at strong positions, cornerstones excluded)
     and 'players to target' (best fits from other rosters at my weak spots, their
@@ -3048,7 +3058,7 @@ def build_trade_strategy(
 
     look_to_trade = player_assets(players, team, strengths, exclude=untouchables)[:top_n]
 
-    fits = mutual_fit(teams, players, team, max_offers=2)
+    fits = mutual_fit(teams, players, picks, team, max_offers=2, include_picks=False)
     seen: set[str] = set()
     targets: list[dict[str, Any]] = []
     for f in fits:
@@ -3185,11 +3195,12 @@ def render_team_needs(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.Data
         f'<div class="gm-card"><b>{clean(my_team)}</b> is strongest at '
         f'<b>{clean(" and ".join(my_strengths))}</b> and has the clearest needs at '
         f'<b>{clean(" and ".join(my_needs))}</b>. Each card below shows what your roster '
-        "could plausibly offer that specific team's weak spots, and what their roster has "
-        "that could fill yours — a needs-fit read, not a value-balanced trade proposal.</div>"
+        "could plausibly offer that specific team's weak spots (players and owned draft picks), "
+        "and what their roster has that could fill yours — a needs-fit read, not a "
+        "value-balanced trade proposal.</div>"
     )
 
-    fits = mutual_fit(teams, players, my_team)
+    fits = mutual_fit(teams, players, picks, my_team)
     if not fits:
         st.info("No other teams were found to compare against.")
         return
