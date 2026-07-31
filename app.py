@@ -13,7 +13,7 @@ import requests
 import streamlit as st
 
 LEAGUE_ID = "1382737164013436928"
-MY_TEAM_NAME = "7 toes & the other cheek"
+MY_TEAM_NAME = "what up dough"
 SLEEPER_BASE = "https://api.sleeper.app/v1"
 FANTASYCALC_URL = (
     "https://api.fantasycalc.com/values/current"
@@ -1229,7 +1229,7 @@ def build_teams(players: pd.DataFrame, picks: pd.DataFrame) -> pd.DataFrame:
 
 def find_my_team(names: list[str]) -> str | None:
     exact = next((x for x in names if x.casefold() == MY_TEAM_NAME.casefold()), None)
-    return exact or next((x for x in names if "7 toes" in x.casefold()), None)
+    return exact or next((x for x in names if "what up" in x.casefold()), None)
 
 
 def ordinal(n: int) -> str:
