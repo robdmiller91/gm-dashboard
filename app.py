@@ -2923,9 +2923,12 @@ def apply_roster_moves(
     """Return copies of players/picks reflecting a hypothetical set of moves.
 
     Giving up an asset removes it from the pool outright (this tool doesn't
-    model who receives it, only how your own roster changes). Acquiring an
-    asset simply reassigns its Team/Current Owner to my_team, which correctly
-    removes it from whoever previously held it too.
+    model who receives it, only how your own roster changes). Acquiring a real
+    player or pick simply reassigns its Team/Current Owner to my_team, which
+    correctly removes it from whoever previously held it too. Acquiring a devy
+    prospect or an unrostered rookie appends a brand-new row instead, since
+    neither exists yet as a row on any team in the players table — there's
+    nothing to reassign from.
     """
     players_mod = players.copy()
     picks_mod = picks.copy()
@@ -2945,11 +2948,33 @@ def apply_roster_moves(
                 )
             ]
 
+    new_rows = []
     for a in acquire_assets:
         if a["type"] == "player":
             players_mod.loc[
                 (players_mod["Team"] == a["team"]) & (players_mod["Player"] == a["label"]), "Team"
             ] = my_team
+        elif a["type"] == "devy":
+            new_rows.append(
+                {
+                    "Team": my_team, "Roster ID": -1, "Player": a["player_name"],
+                    "Position": a["position"], "NFL Team": a.get("nfl_team", "NCAA"),
+                    "Age": None, "Status": "Devy", "Value": a["value"],
+                    "Overall Rank": None, "Position Rank": None, "Trend": 0,
+                    "Sleeper ID": f'devy-{a["prospect_rank"]}-{a["player_name"]}',
+                    "Image": a["image"],
+                }
+            )
+        elif a["type"] == "rookie":
+            new_rows.append(
+                {
+                    "Team": my_team, "Roster ID": -1, "Player": a["player_name"],
+                    "Position": a["position"], "NFL Team": a.get("nfl_team", "FA"),
+                    "Age": None, "Status": "Bench", "Value": a["value"],
+                    "Overall Rank": None, "Position Rank": None, "Trend": 0,
+                    "Sleeper ID": a["sleeper_id"], "Image": a["image"],
+                }
+            )
         else:
             picks_mod.loc[
                 (picks_mod["Current Owner"] == a["team"])
@@ -2958,6 +2983,9 @@ def apply_roster_moves(
                 & (picks_mod["Original Team"] == a["original_team"]),
                 "Current Owner",
             ] = my_team
+
+    if new_rows:
+        players_mod = pd.concat([players_mod, pd.DataFrame(new_rows)], ignore_index=True)
 
     return players_mod, picks_mod
 
@@ -3141,6 +3169,8 @@ def build_trade_strategy(
 
 
 def render_custom_trade_builder(
+    bundle: dict[str, Any],
+    fc_rows: list[dict[str, Any]],
     teams: pd.DataFrame,
     players: pd.DataFrame,
     picks: pd.DataFrame,
@@ -3155,12 +3185,24 @@ def render_custom_trade_builder(
     )
     mine = selectable_assets(players, picks, team, untouchables)
     theirs = selectable_assets(players, picks, partner, untouchables)
+    devy_pool = devy_asset_pool(2027)
+    rookie_pool = rookie_asset_pool(bundle, fc_rows, players, 2026)
+    mine.update(rookie_pool)
+    mine.update(devy_pool)
+    theirs.update(rookie_pool)
+    theirs.update(devy_pool)
 
     left, right = st.columns(2)
     with left:
         send_labels = st.multiselect(f"{team} sends", list(mine.keys()), key="manual_send")
     with right:
         receive_labels = st.multiselect(f"{team} receives", list(theirs.keys()), key="manual_receive")
+    st.caption(
+        "🆕 entries are real 2026 rookies not yet rostered by anyone in this league — live "
+        "Sleeper data and real FantasyCalc value. 🔮 entries are 2027 devy prospects — "
+        "speculative, not yet real NFL players, and not owned by anyone. Both are optional "
+        "add-ons for sketching a 'what if' scenario, not real trade compensation from either side."
+    )
 
     send_assets = labels_to_assets(send_labels, mine)
     receive_assets = labels_to_assets(receive_labels, theirs)
@@ -3196,7 +3238,10 @@ def render_custom_trade_builder(
 
     if receive_assets:
         remaining = max(0, receive_value - send_value)
-        available = [a for k, a in mine.items() if k not in send_labels]
+        available = [
+            a for k, a in mine.items()
+            if k not in send_labels and a.get("type") not in {"devy", "rookie"}
+        ]
         suggestions = package_candidates(available, remaining, favourable) if remaining else [[]]
         for i, extra in enumerate(suggestions[:4], start=1):
             full_send = send_assets + extra
@@ -3300,7 +3345,10 @@ def render_team_needs(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.Data
     )
 
 
-def render_roster_lab(bundle: dict[str, Any], teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame) -> None:
+def render_roster_lab(
+    bundle: dict[str, Any], fc_rows: list[dict[str, Any]],
+    teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame,
+) -> None:
     render_brand(
         "Roster Lab",
         "Plug in hypothetical moves and project your roster's rank now — and its trajectory in the coming years",
@@ -3322,6 +3370,8 @@ def render_roster_lab(bundle: dict[str, Any], teams: pd.DataFrame, players: pd.D
 
     give_pool = build_asset_pool(players, picks, include_teams=[my_team])
     acquire_pool = build_asset_pool(players, picks, exclude_teams=[my_team], show_team_label=True)
+    acquire_pool.update(rookie_asset_pool(bundle, fc_rows, players, 2026))
+    acquire_pool.update(devy_asset_pool(2027))
 
     c1, c2 = st.columns(2)
     with c1:
@@ -3331,6 +3381,13 @@ def render_roster_lab(bundle: dict[str, Any], teams: pd.DataFrame, players: pd.D
     with c2:
         acquire_labels = st.multiselect(
             "Players/picks you'd acquire", list(acquire_pool.keys()), key="lab_acquire"
+        )
+        st.caption(
+            "🆕 entries are real 2026 rookies already drafted by an NFL team but not yet "
+            "rostered by anyone in this league — live Sleeper data and real FantasyCalc value. "
+            "🔮 entries are 2027 devy prospects — not yet real NFL players, not owned by anyone, "
+            "and valued on a much more heavily discounted scale. Adding either is a 'what if' "
+            "sketch, not a real move."
         )
 
     if st.button("Reset simulation"):
@@ -3437,6 +3494,8 @@ def render_roster_lab(bundle: dict[str, Any], teams: pd.DataFrame, players: pd.D
 
 
 def render_trade_intelligence(
+    bundle: dict[str, Any],
+    fc_rows: list[dict[str, Any]],
     teams: pd.DataFrame,
     players: pd.DataFrame,
     picks: pd.DataFrame,
@@ -3484,7 +3543,7 @@ def render_trade_intelligence(
         + '</div>'
     )
 
-    render_custom_trade_builder(teams, players, picks, team, untouchables)
+    render_custom_trade_builder(bundle, fc_rows, teams, players, picks, team, untouchables)
 
     st.markdown("---")
     st.markdown("### Recommended Trade Partners")
@@ -3911,6 +3970,69 @@ def build_devy_pool(devy_df: pd.DataFrame, season: int) -> pd.DataFrame:
         ["Player", "Position", "NFL Team", "Age", "Value", "Search Rank",
          "Sleeper ID", "Image", "Prospect Rank", "Notes"]
     ]
+
+
+def devy_prospect_assets(season: int = 2027) -> list[dict[str, Any]]:
+    """Speculative devy prospects as optional hypothetical trade/roster assets.
+
+    Values are rescaled to roughly the ballpark of a discounted future rookie
+    pick — NOT on the same market footing as FantasyCalc's real dynasty values,
+    since these players haven't even been drafted by an NFL team yet. Any
+    projection involving these is a rough directional sketch, not a real
+    trade proposal or roster move Sleeper (or any market) would recognize.
+    """
+    pool = build_devy_pool(load_devy_prospects(), season)
+    if pool.empty:
+        return []
+    max_rank = int(pool["Prospect Rank"].max())
+    top_value = 4300 * 0.55  # discounted vs. a real, already-existing 2027 1.01
+    floor_value = 400
+    assets = []
+    for _, row in pool.iterrows():
+        frac = (max_rank - row["Prospect Rank"]) / max(max_rank - 1, 1)
+        value = round(floor_value + (top_value - floor_value) * (frac ** 1.3))
+        assets.append(
+            {
+                "label": f'🔮 {row["Player"]} ({row["Position"]}, {season} devy)',
+                "value": value, "type": "devy", "position": row["Position"],
+                "image": row["Image"], "player_name": row["Player"],
+                "nfl_team": row["NFL Team"], "prospect_rank": int(row["Prospect Rank"]),
+            }
+        )
+    return assets
+
+
+def devy_asset_pool(season: int = 2027) -> dict[str, dict[str, Any]]:
+    return {a["label"]: a for a in devy_prospect_assets(season)}
+
+
+def unrostered_rookie_assets(
+    bundle: dict[str, Any], fc_rows: list[dict[str, Any]], players: pd.DataFrame, season: int = 2026
+) -> list[dict[str, Any]]:
+    """Real, already-drafted NFL rookies who aren't yet on any roster in this
+    league — unlike the 2027 devy class, these are live Sleeper players with real
+    FantasyCalc dynasty values, just not yet added/drafted onto a team here."""
+    current_season = int(bundle["league"].get("season") or season)
+    rookies = build_rookies(bundle, fc_rows, season, current_season)
+    if rookies.empty:
+        return []
+    rostered_ids = set(players["Sleeper ID"].astype(str))
+    pool = rookies[~rookies["Sleeper ID"].astype(str).isin(rostered_ids) & (rookies["Value"] > 0)]
+    return [
+        {
+            "label": f'🆕 {row["Player"]} ({row["Position"]}, {season} rookie)',
+            "value": int(row["Value"]), "type": "rookie", "position": row["Position"],
+            "image": row["Image"], "player_name": row["Player"],
+            "nfl_team": row["NFL Team"], "sleeper_id": str(row["Sleeper ID"]),
+        }
+        for _, row in pool.iterrows()
+    ]
+
+
+def rookie_asset_pool(
+    bundle: dict[str, Any], fc_rows: list[dict[str, Any]], players: pd.DataFrame, season: int = 2026
+) -> dict[str, dict[str, Any]]:
+    return {a["label"]: a for a in unrostered_rookie_assets(bundle, fc_rows, players, season)}
 
 
 def build_rookies(
@@ -4551,9 +4673,9 @@ def main() -> None:
     elif page == "Team Needs":
         render_team_needs(teams, players, picks)
     elif page == "Trade Centre":
-        render_trade_intelligence(teams, players, picks)
+        render_trade_intelligence(bundle, fc_rows, teams, players, picks)
     elif page == "Roster Lab":
-        render_roster_lab(bundle, teams, players, picks)
+        render_roster_lab(bundle, fc_rows, teams, players, picks)
     elif page == "Draft Capital":
         render_draft(picks, teams)
     elif page == "Draft History":
