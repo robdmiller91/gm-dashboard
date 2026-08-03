@@ -2959,8 +2959,8 @@ def apply_roster_moves(
                 {
                     "Team": my_team, "Roster ID": -1, "Player": a["player_name"],
                     "Position": a["position"], "NFL Team": a.get("nfl_team", "NCAA"),
-                    "Age": None, "Status": "Devy", "Value": a["value"],
-                    "Overall Rank": None, "Position Rank": None, "Trend": 0,
+                    "Age": float("nan"), "Status": "Devy", "Value": a["value"],
+                    "Overall Rank": float("nan"), "Position Rank": float("nan"), "Trend": 0,
                     "Sleeper ID": f'devy-{a["prospect_rank"]}-{a["player_name"]}',
                     "Image": a["image"],
                 }
@@ -2970,8 +2970,8 @@ def apply_roster_moves(
                 {
                     "Team": my_team, "Roster ID": -1, "Player": a["player_name"],
                     "Position": a["position"], "NFL Team": a.get("nfl_team", "FA"),
-                    "Age": None, "Status": "Bench", "Value": a["value"],
-                    "Overall Rank": None, "Position Rank": None, "Trend": 0,
+                    "Age": a.get("age", float("nan")), "Status": "Bench", "Value": a["value"],
+                    "Overall Rank": float("nan"), "Position Rank": float("nan"), "Trend": 0,
                     "Sleeper ID": a["sleeper_id"], "Image": a["image"],
                 }
             )
@@ -3993,7 +3993,7 @@ def devy_prospect_assets(season: int = 2027) -> list[dict[str, Any]]:
         value = round(floor_value + (top_value - floor_value) * (frac ** 1.3))
         assets.append(
             {
-                "label": f'🔮 {row["Player"]} ({row["Position"]}, {season} devy)',
+                "label": f'🔮 {row["Player"]} · {row["Position"]} · {row["NFL Team"]} · {value:,} (2027 devy)',
                 "value": value, "type": "devy", "position": row["Position"],
                 "image": row["Image"], "player_name": row["Player"],
                 "nfl_team": row["NFL Team"], "prospect_rank": int(row["Prospect Rank"]),
@@ -4020,10 +4020,16 @@ def unrostered_rookie_assets(
     pool = rookies[~rookies["Sleeper ID"].astype(str).isin(rostered_ids) & (rookies["Value"] > 0)]
     return [
         {
-            "label": f'🆕 {row["Player"]} ({row["Position"]}, {season} rookie)',
+            "label": (
+                f'🆕 {row["Player"]} · {row["Position"]} · {row["NFL Team"]} · '
+                f'{int(row["Value"]):,}'
+                + (f' · {row["Age"]:.1f}y' if pd.notna(row["Age"]) else "")
+                + f' ({season} rookie)'
+            ),
             "value": int(row["Value"]), "type": "rookie", "position": row["Position"],
             "image": row["Image"], "player_name": row["Player"],
             "nfl_team": row["NFL Team"], "sleeper_id": str(row["Sleeper ID"]),
+            "age": row["Age"] if pd.notna(row["Age"]) else float("nan"),
         }
         for _, row in pool.iterrows()
     ]
