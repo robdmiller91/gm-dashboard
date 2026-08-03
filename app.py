@@ -1111,6 +1111,61 @@ def build_players(bundle: dict[str, Any], fc_rows: list[dict[str, Any]]) -> pd.D
     return pd.DataFrame(rows)
 
 
+# Calibrated from published dynasty market patterns (Footballguys, DynastyProcess,
+# KeepTradeCut, DraftSharks, etc.): early 1st picks (1.01-1.03) sit in a near-elite
+# tier worth roughly 3x a late 1st, 2nd-round picks decay more gently, and 3rd+
+# rounds flatten out toward "depth" value. (start_mult, end_mult, curve_power) —
+# start = 1st pick in the round, end = last pick, power > 1 gives a steeper drop
+# early and a flatter tail late, matching how the real market actually prices picks.
+DRAFT_SLOT_CURVES = {
+    1: (1.65, 0.55, 1.6),
+    2: (1.40, 0.70, 1.4),
+    3: (1.25, 0.80, 1.3),
+}
+DEFAULT_SLOT_CURVE = (1.15, 0.85, 1.2)
+
+
+def slot_value_multipliers(total_slots: int, round_no: int) -> dict[int, float]:
+    """Smoothly declining value multiplier by pick slot within a round, normalized so
+    the round's average multiplier is 1.0 — this redistributes value realistically
+    within a round without changing the round's overall calibration."""
+    start, end, power = DRAFT_SLOT_CURVES.get(round_no, DEFAULT_SLOT_CURVE)
+    if total_slots <= 1:
+        return {1: 1.0}
+    raw = {}
+    for slot in range(1, total_slots + 1):
+        frac = (total_slots - slot) / (total_slots - 1)
+        raw[slot] = end + (start - end) * (frac ** power)
+    mean_raw = sum(raw.values()) / len(raw)
+    return {slot: v / mean_raw for slot, v in raw.items()}
+
+
+def resolve_slot_order(bundle: dict[str, Any], season: int, roster_to_team: dict[int, str]) -> dict[str, int]:
+    """Best-known 1-indexed slot per team for a season's rookie draft: the official
+    Sleeper draft order if the commissioner has set one, otherwise a standings-based
+    estimate (worst current record picks first) — same convention as Mock Draft."""
+    league_id = str(bundle["league"].get("league_id") or LEAGUE_ID)
+    drafts = load_league_drafts(league_id)
+    users = {str(u.get("user_id")): team_name(u) for u in bundle["users"]}
+    official = official_draft_order(drafts, season, users)
+    if official:
+        return {t: i + 1 for i, t in enumerate(official)}
+
+    rows = []
+    for r in bundle["rosters"]:
+        settings = r.get("settings") or {}
+        wins = int(settings.get("wins") or 0)
+        losses = int(settings.get("losses") or 0)
+        ties = int(settings.get("ties") or 0)
+        fpts = float(settings.get("fpts") or 0) + float(settings.get("fpts_decimal") or 0) / 100
+        games = max(wins + losses + ties, 1)
+        team = roster_to_team.get(int(r["roster_id"]))
+        if team:
+            rows.append((team, wins / games, fpts))
+    rows.sort(key=lambda x: (x[1], x[2]))
+    return {team: i + 1 for i, (team, _, _) in enumerate(rows)}
+
+
 def build_picks(bundle: dict[str, Any]) -> pd.DataFrame:
     league = bundle["league"]
     users = {str(u.get("user_id")): team_name(u) for u in bundle["users"]}
@@ -1161,19 +1216,33 @@ def build_picks(bundle: dict[str, Any]) -> pd.DataFrame:
 
     year_factor = {current_season: 1.0, current_season + 1: 0.88, current_season + 2: 0.76}
     round_base = {1: 4300, 2: 1800, 3: 800, 4: 350, 5: 150}
+    total_slots = len(roster_to_team) or 12
+
+    # Resolve a slot order per season once, reusing the official Sleeper order
+    # when the commissioner has set one, or a standings-based estimate otherwise.
+    slot_orders: dict[int, dict[str, int]] = {
+        season: resolve_slot_order(bundle, season, roster_to_team) for season in seasons
+    }
+
     rows = []
     for (season, rnd, original), owner in ownership.items():
+        original_team = roster_to_team.get(original, str(original))
+        slot = slot_orders.get(season, {}).get(original_team)
+        multiplier = slot_value_multipliers(total_slots, rnd).get(slot, 1.0) if slot else 1.0
+        value = round(round_base.get(rnd, 75) * year_factor.get(season, .70) * multiplier)
         rows.append(
             {
                 "Season": season,
                 "Round": rnd,
-                "Original Team": roster_to_team.get(original, str(original)),
+                "Slot": slot,
+                "Original Team": original_team,
                 "Current Owner": roster_to_team.get(owner, str(owner)),
-                "Value": round(round_base.get(rnd, 75) * year_factor.get(season, .70)),
+                "Value": value,
                 "Traded": owner != original,
             }
         )
     return pd.DataFrame(rows)
+
 
 
 def build_teams(players: pd.DataFrame, picks: pd.DataFrame) -> pd.DataFrame:
