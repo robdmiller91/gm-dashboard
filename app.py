@@ -2118,7 +2118,7 @@ def render_team_blueprint(
 
     st.divider()
     st.markdown("#### Cornerstone Assets")
-    st.caption("Elite, still-young assets — adjust the threshold in Trade Centre.")
+    st.caption("Each team's own best player at QB/RB/WR/TE — adjust the value floor in Trade Centre.")
     untouchables = compute_untouchables(players)
     my_cornerstones = players[(players["Team"] == team) & (players["Player"].isin(untouchables))]
     if my_cornerstones.empty:
@@ -2468,26 +2468,33 @@ def render_rankings(players: pd.DataFrame) -> None:
 
 
 
-UNTOUCHABLE_AGE_CUTOFFS = {"QB": 33, "RB": 25, "WR": 27, "TE": 28}
+CORNERSTONE_AGE_CEILINGS = {"QB": 32, "RB": 26, "WR": 29, "TE": 30}
 
 
-def compute_untouchables(players: pd.DataFrame, top_n: int = 24) -> set[str]:
-    """Elite, still-ascending assets that stay off the table in trade analysis,
-    even when the raw value math would technically 'work'.
+def compute_untouchables(players: pd.DataFrame, min_value: int = 2000) -> set[str]:
+    """Cornerstone / foundational assets — every team's own anchor piece(s) at
+    each position they roster, not just whoever ranks in some league-wide top tier.
 
-    This mirrors how dynasty managers actually treat true cornerstone pieces —
-    a young workhorse RB1 like Jahmyr Gibbs doesn't get shopped just because
-    a package matches his FantasyCalc value. The rule: rank in the league-wide
-    top `top_n` by value, AND fall under a position-specific age ceiling (an
-    ageing top-24 asset is still tradeable; a young one generally isn't).
+    This mirrors how dynasty managers actually talk about untouchables: each
+    team has its own foundational player(s) — the clear QB1/RB1/WR1/TE1
+    building block for THAT roster — regardless of whether that specific
+    player would crack a global elite tier. A player only qualifies if they
+    clear a minimum value floor (so a replacement-level "QB1" on a QB-starved
+    roster doesn't get tagged just for being the best of a weak group) and
+    isn't already aging out of a foundational role for their position.
     """
-    pool = players[players["Value"] > 0].sort_values("Value", ascending=False).head(top_n)
-
-    def young_enough(row: pd.Series) -> bool:
-        cutoff = UNTOUCHABLE_AGE_CUTOFFS.get(row["Position"], 27)
-        return bool(pd.isna(row["Age"]) or row["Age"] <= cutoff)
-
-    return set(pool[pool.apply(young_enough, axis=1)]["Player"])
+    cornerstones: set[str] = set()
+    for team in players["Team"].unique():
+        roster = players[(players["Team"] == team) & (players["Value"] >= min_value)]
+        for pos in ["QB", "RB", "WR", "TE"]:
+            pos_players = roster[roster["Position"] == pos]
+            if pos_players.empty:
+                continue
+            best = pos_players.sort_values("Value", ascending=False).iloc[0]
+            ceiling = CORNERSTONE_AGE_CEILINGS.get(pos, 29)
+            if pd.isna(best["Age"]) or best["Age"] <= ceiling:
+                cornerstones.add(best["Player"])
+    return cornerstones
 
 
 def positional_profile(teams: pd.DataFrame, team: str) -> dict[str, int]:
@@ -3216,8 +3223,9 @@ def render_custom_trade_builder(
     locked_outgoing = [a["label"] for a in send_assets if a["label"] in untouchables]
     if locked_outgoing:
         st.warning(
-            f"🔒 {', '.join(locked_outgoing)} — flagged as an untouchable cornerstone asset "
-            "(elite value, still young for the position). You can still build this trade, "
+            f"🔒 {', '.join(locked_outgoing)} — flagged as this team's cornerstone at their "
+            "position (clears the value floor, not yet aging out of the role). You can still "
+            "build this trade, "
             "but it's not one the auto-generated scenarios would ever suggest."
         )
 
@@ -3428,7 +3436,7 @@ def render_roster_lab(
                 f'(Players {int(row["Player_Value"]):,} + Picks {int(row["Pick_Value"]):,})<br>'
                 f'Avg Age: {row["Avg_Age"]}<br>'
                 f'QB #{int(row["QB_Rank"])} · RB #{int(row["RB_Rank"])} · '
-                f'WR #{int(row["WR_Rank"])} · TE #{int(row["TE_Rank"])}'
+                f'WR #{int(row["WR_Rank"])} · TE #{int(row["TE_Rank"])} · PICKS #{int(row["Pick_Rank"])}'
                 f'</div>'
             )
 
@@ -3518,17 +3526,20 @@ def render_trade_intelligence(
     strengths = sorted(["QB", "RB", "WR", "TE"], key=lambda p: profile[p])[:2]
     needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: profile[p], reverse=True)[:2]
 
-    with st.expander("Untouchable threshold", expanded=False):
-        untouchable_n = st.slider(
-            "Treat the league-wide top N value players as untouchable (subject to age limits)",
-            min_value=6, max_value=48, value=24, step=2,
+    with st.expander("Cornerstone threshold", expanded=False):
+        min_cornerstone_value = st.slider(
+            "Minimum dynasty value to qualify as a team's cornerstone at a position",
+            min_value=500, max_value=6000, value=2000, step=250,
             help=(
-                "Elite, still-young assets (e.g. a workhorse RB1 in his mid-20s) are excluded "
-                "from auto-generated trade suggestions even if the value math balances. "
-                "Ageing top-N players don't get the same protection."
+                "Each team's own best player at QB/RB/WR/TE is treated as a cornerstone/"
+                "foundational piece — excluded from auto-generated trade suggestions — as long "
+                "as they clear this value floor and aren't already aging out of the role. This "
+                "isn't a league-wide elite-tier cutoff: a team's clear WR1 counts even if they "
+                "wouldn't crack some global top-24 list. Lower this to tag more teams' 'best of "
+                "a weak group' players; raise it to only tag true difference-makers."
             ),
         )
-    untouchables = compute_untouchables(players, top_n=untouchable_n)
+    untouchables = compute_untouchables(players, min_value=min_cornerstone_value)
     my_untouchables = sorted(
         players[(players["Team"] == team) & (players["Player"].isin(untouchables))]["Player"]
     )
