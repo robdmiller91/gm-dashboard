@@ -3745,6 +3745,12 @@ def load_transactions(league_id: str, week: int) -> list[dict[str, Any]]:
 def load_all_trades(bundle: dict[str, Any]) -> list[dict[str, Any]]:
     """Every completed trade across this league's full history, walking the same
     previous_league_id chain as Draft History, normalized into simple records.
+
+    Sleeper team display names are just editable text — the same manager can
+    show up under a different team name in different seasons. Everything here
+    is tracked by Sleeper's stable user_id underneath, with the historical team
+    name attached only for display, so filtering by "team" actually follows the
+    person across name changes instead of silently fragmenting their history.
     """
     league_id = str(bundle["league"].get("league_id") or LEAGUE_ID)
     history = load_draft_history(league_id)
@@ -3764,10 +3770,17 @@ def load_all_trades(bundle: dict[str, Any]) -> list[dict[str, Any]]:
         if not season_league_id:
             continue
         users_map = {str(u.get("user_id")): team_name(u) for u in entry.get("users") or []}
-        roster_to_team = {
-            int(r["roster_id"]): users_map.get(str(r.get("owner_id")), f"Roster {r['roster_id']}")
+        roster_to_uid = {
+            int(r["roster_id"]): str(r.get("owner_id"))
             for r in entry.get("rosters") or []
         }
+
+        def team_at_time(rid: int | None) -> tuple[str, str]:
+            """Returns (user_id, team name as it was that season)."""
+            if rid is None:
+                return "", "Unknown"
+            uid = roster_to_uid.get(int(rid), "")
+            return uid, users_map.get(uid, f"Roster {rid}")
 
         for week in range(1, 19):
             for tx in load_transactions(season_league_id, week):
@@ -3775,7 +3788,7 @@ def load_all_trades(bundle: dict[str, Any]) -> list[dict[str, Any]]:
                     continue
 
                 roster_ids = tx.get("roster_ids") or []
-                teams_involved = sorted({roster_to_team.get(int(rid), f"Roster {rid}") for rid in roster_ids})
+                uids_involved = sorted({team_at_time(rid)[0] for rid in roster_ids if team_at_time(rid)[0]})
 
                 adds = tx.get("adds") or {}
                 drops = tx.get("drops") or {}
@@ -3788,33 +3801,26 @@ def load_all_trades(bundle: dict[str, Any]) -> list[dict[str, Any]]:
                         or " ".join(filter(None, [meta.get("first_name"), meta.get("last_name")]))
                         or str(pid)
                     )
+                    to_uid, to_name = team_at_time(to_rid)
+                    from_uid, from_name = team_at_time(from_rid)
                     players_moved.append(
                         {
                             "player": name, "position": meta.get("position") or "",
-                            "to_team": roster_to_team.get(int(to_rid), f"Roster {to_rid}"),
-                            "from_team": (
-                                roster_to_team.get(int(from_rid), "Unknown")
-                                if from_rid is not None else "Unknown"
-                            ),
+                            "to_uid": to_uid, "to_team": to_name,
+                            "from_uid": from_uid, "from_team": from_name,
                             "image": player_image_url({"player_id": pid}),
                         }
                     )
 
                 picks_moved = []
                 for p in tx.get("draft_picks") or []:
-                    prev_owner = p.get("previous_owner_id")
-                    new_owner = p.get("owner_id")
+                    to_uid, to_name = team_at_time(p.get("owner_id"))
+                    from_uid, from_name = team_at_time(p.get("previous_owner_id"))
                     picks_moved.append(
                         {
                             "season": p.get("season"), "round": p.get("round"),
-                            "from_team": (
-                                roster_to_team.get(int(prev_owner), "Unknown")
-                                if prev_owner is not None else "Unknown"
-                            ),
-                            "to_team": (
-                                roster_to_team.get(int(new_owner), "Unknown")
-                                if new_owner is not None else "Unknown"
-                            ),
+                            "to_uid": to_uid, "to_team": to_name,
+                            "from_uid": from_uid, "from_team": from_name,
                         }
                     )
 
@@ -3823,7 +3829,7 @@ def load_all_trades(bundle: dict[str, Any]) -> list[dict[str, Any]]:
 
                 trades.append(
                     {
-                        "season": season, "week": week, "teams": teams_involved,
+                        "season": season, "week": week, "user_ids": uids_involved,
                         "players_moved": players_moved, "picks_moved": picks_moved,
                         "timestamp": tx.get("created") or 0,
                         "transaction_id": tx.get("transaction_id"),
@@ -3949,18 +3955,25 @@ DEVY_PROSPECTS_PATH = "devy_prospects.csv"
 def render_trade_history(bundle: dict[str, Any], teams: pd.DataFrame) -> None:
     render_brand("Trade History", "Every completed trade across this league's history")
 
+    # Filter by the CURRENT team name (what you recognize today), but match
+    # trades by the stable Sleeper user_id underneath — so if a manager has
+    # renamed their team at any point, their full history still shows up
+    # together instead of being split across old and new names.
+    current_names_by_uid = {str(u.get("user_id")): team_name(u) for u in bundle["users"]}
+    name_to_uid = {v: k for k, v in current_names_by_uid.items()}
+    current_names = sorted(current_names_by_uid.values())
+
     team_names = teams["Team"].tolist()
-    default_team = find_my_team(team_names) or team_names[0]
-    filter_choice = st.selectbox(
-        "Filter by team", ["All Teams"] + team_names,
-        index=(team_names.index(default_team) + 1),
-    )
+    default_team = find_my_team(team_names) or (current_names[0] if current_names else None)
+    default_index = current_names.index(default_team) + 1 if default_team in current_names else 0
+    filter_choice = st.selectbox("Filter by team", ["All Teams"] + current_names, index=default_index)
 
     with st.spinner("Loading trade history from Sleeper..."):
         trades = load_all_trades(bundle)
 
     if filter_choice != "All Teams":
-        trades = [t for t in trades if filter_choice in t["teams"]]
+        selected_uid = name_to_uid.get(filter_choice)
+        trades = [t for t in trades if selected_uid in t["user_ids"]]
 
     if not trades:
         st.info("No completed trades were found" + (f" for {filter_choice}." if filter_choice != "All Teams" else "."))
@@ -3969,16 +3982,26 @@ def render_trade_history(bundle: dict[str, Any], teams: pd.DataFrame) -> None:
     st.caption(f"{len(trades)} trade(s) found.")
 
     for t in trades:
-        by_team: dict[str, dict[str, list]] = {team: {"players": [], "picks": []} for team in t["teams"]}
+        by_uid: dict[str, dict[str, Any]] = {
+            uid: {"players": [], "picks": [], "name_then": None} for uid in t["user_ids"]
+        }
         for p in t["players_moved"]:
-            if p["to_team"] in by_team:
-                by_team[p["to_team"]]["players"].append(p)
+            if p["to_uid"] in by_uid:
+                by_uid[p["to_uid"]]["players"].append(p)
+                by_uid[p["to_uid"]]["name_then"] = p["to_team"]
         for pk in t["picks_moved"]:
-            if pk["to_team"] in by_team:
-                by_team[pk["to_team"]]["picks"].append(pk)
+            if pk["to_uid"] in by_uid:
+                by_uid[pk["to_uid"]]["picks"].append(pk)
+                by_uid[pk["to_uid"]]["name_then"] = pk["to_team"]
 
         side_divs = []
-        for team, assets in by_team.items():
+        for uid, assets in by_uid.items():
+            name_then = assets["name_then"] or current_names_by_uid.get(uid, "Unknown")
+            name_now = current_names_by_uid.get(uid)
+            title = clean(name_then)
+            if name_now and name_now != name_then:
+                title += f' <span style="opacity:.6;font-weight:600">(now {clean(name_now)})</span>'
+
             items_html = "".join(
                 f'<div class="dash-list-row"><img src="{clean(p["image"])}" '
                 'onerror="this.onerror=null;this.src=\'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png\';">'
@@ -3994,7 +4017,7 @@ def render_trade_history(bundle: dict[str, Any], teams: pd.DataFrame) -> None:
             if not items_html:
                 items_html = '<div class="dash-list-sub" style="padding:.3rem 0">Nothing received</div>'
             side_divs.append(
-                f'<div class="trade-side"><div class="trade-side-title">{clean(team)} received</div>'
+                f'<div class="trade-side"><div class="trade-side-title">{title} received</div>'
                 f'{items_html}</div>'
             )
         sides_html = (
@@ -4002,7 +4025,7 @@ def render_trade_history(bundle: dict[str, Any], teams: pd.DataFrame) -> None:
             if len(side_divs) == 2 else "".join(side_divs)
         )
 
-        grid_class = "trade-grid" if len(by_team) == 2 else "trade-multi-grid"
+        grid_class = "trade-grid" if len(by_uid) == 2 else "trade-multi-grid"
         render_html(
             f'<div class="trade-card"><div class="trade-card-top">'
             f'<b>{clean(t["season"])} · Week {t["week"]}</b></div>'
