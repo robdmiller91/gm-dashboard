@@ -2930,34 +2930,44 @@ def apply_roster_moves(
     my_team: str,
     give_assets: list[dict[str, Any]],
     acquire_assets: list[dict[str, Any]],
+    give_to_team: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return copies of players/picks reflecting a hypothetical set of moves.
 
-    Giving up an asset removes it from the pool outright (this tool doesn't
-    model who receives it, only how your own roster changes). Acquiring a real
-    player or pick simply reassigns its Team/Current Owner to my_team, which
-    correctly removes it from whoever previously held it too. Acquiring a devy
-    prospect or an unrostered rookie appends a brand-new row instead, since
-    neither exists yet as a row on any team in the players table — there's
-    nothing to reassign from.
+    If give_to_team is set, giving up an asset reassigns it to that specific
+    partner (so both sides of the trade can be evaluated). If left as None,
+    giving up an asset just removes it from the pool outright — the original
+    one-sided "how does my roster change" behavior. Acquiring a real player or
+    pick simply reassigns its Team/Current Owner to my_team, which correctly
+    removes it from whoever previously held it too. Acquiring a devy prospect
+    or an unrostered rookie appends a brand-new row instead, since neither
+    exists yet as a row on any team in the players table — there's nothing to
+    reassign from.
     """
     players_mod = players.copy()
     picks_mod = picks.copy()
 
     for a in give_assets:
         if a["type"] == "player":
-            players_mod = players_mod[
-                ~((players_mod["Team"] == my_team) & (players_mod["Player"] == a["label"]))
-            ]
+            if give_to_team:
+                players_mod.loc[
+                    (players_mod["Team"] == my_team) & (players_mod["Player"] == a["label"]), "Team"
+                ] = give_to_team
+            else:
+                players_mod = players_mod[
+                    ~((players_mod["Team"] == my_team) & (players_mod["Player"] == a["label"]))
+                ]
         else:
-            picks_mod = picks_mod[
-                ~(
-                    (picks_mod["Current Owner"] == my_team)
-                    & (picks_mod["Season"] == a["season"])
-                    & (picks_mod["Round"] == a["round"])
-                    & (picks_mod["Original Team"] == a["original_team"])
-                )
-            ]
+            mask = (
+                (picks_mod["Current Owner"] == my_team)
+                & (picks_mod["Season"] == a["season"])
+                & (picks_mod["Round"] == a["round"])
+                & (picks_mod["Original Team"] == a["original_team"])
+            )
+            if give_to_team:
+                picks_mod.loc[mask, "Current Owner"] = give_to_team
+            else:
+                picks_mod = picks_mod[~mask]
 
     new_rows = []
     for a in acquire_assets:
@@ -3357,6 +3367,68 @@ def render_team_needs(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.Data
     )
 
 
+def render_roster_impact_panel(
+    bundle: dict[str, Any], team: str,
+    teams: pd.DataFrame, teams_mod: pd.DataFrame,
+    players: pd.DataFrame, players_mod: pd.DataFrame,
+    heading: str,
+) -> None:
+    current_row = teams[teams["Team"] == team].iloc[0]
+    projected_row = teams_mod[teams_mod["Team"] == team].iloc[0]
+
+    st.markdown(f"### {clean(heading)}: Before vs. After")
+    cols = st.columns(2)
+    for col, row, sublabel in zip(cols, [current_row, projected_row], ["Current", "Projected"]):
+        with col:
+            render_html(
+                f'<div class="gm-card"><b>{clean(sublabel)}</b><br>'
+                f'Overall Rank: #{int(row["Overall_Rank"])} · Window: {clean(row["Window"])}<br>'
+                f'Total Value: {int(row["Total_Value"]):,} '
+                f'(Players {int(row["Player_Value"]):,} + Picks {int(row["Pick_Value"]):,})<br>'
+                f'Avg Age: {row["Avg_Age"]}<br>'
+                f'QB #{int(row["QB_Rank"])} · RB #{int(row["RB_Rank"])} · '
+                f'WR #{int(row["WR_Rank"])} · TE #{int(row["TE_Rank"])} · PICKS #{int(row["Pick_Rank"])}'
+                f'</div>'
+            )
+
+    rank_delta = int(current_row["Overall_Rank"]) - int(projected_row["Overall_Rank"])
+    if rank_delta > 0:
+        st.caption(f"This move improves {heading}'s overall rank by {rank_delta} spot(s) league-wide.")
+    elif rank_delta < 0:
+        st.caption(f"This move drops {heading}'s overall rank by {abs(rank_delta)} spot(s) league-wide.")
+    else:
+        st.caption(f"This move leaves {heading}'s overall rank unchanged league-wide.")
+
+    st.markdown(f"### {clean(heading)}: Share of League")
+    st.caption(
+        "Value Share = share of total league-wide dynasty value. Production Share = share of "
+        "value concentrated in the best possible starting lineup (real slot eligibility, not "
+        "bench) — a dynasty-value proxy, not real box-score production."
+    )
+    cur_prod_pct, cur_prod_rank = production_share(bundle, players, team)
+    cur_val_pct, cur_val_rank = value_share(teams, team)
+    proj_prod_pct, proj_prod_rank = production_share(bundle, players_mod, team)
+    proj_val_pct, proj_val_rank = value_share(teams_mod, team)
+
+    scol1, scol2 = st.columns(2)
+    with scol1:
+        st.markdown("**Current**")
+        render_html(
+            '<div class="share-card-row">'
+            + share_card_html("Production Share", "⚙️", cur_prod_pct, cur_prod_rank, "production")
+            + share_card_html("Value Share", "📈", cur_val_pct, cur_val_rank, "value")
+            + '</div>'
+        )
+    with scol2:
+        st.markdown("**Projected**")
+        render_html(
+            '<div class="share-card-row">'
+            + share_card_html("Production Share", "⚙️", proj_prod_pct, proj_prod_rank, "production")
+            + share_card_html("Value Share", "📈", proj_val_pct, proj_val_rank, "value")
+            + '</div>'
+        )
+
+
 def render_roster_lab(
     bundle: dict[str, Any], fc_rows: list[dict[str, Any]],
     teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame,
@@ -3372,16 +3444,39 @@ def render_roster_lab(
         "Your team", team_names, index=team_names.index(default_team), key="lab_my_team"
     )
 
+    other_teams = [t for t in team_names if t != my_team]
+    partner_choice = st.selectbox(
+        "Trade partner (optional)",
+        ["None — one-sided sandbox"] + other_teams,
+        key="lab_partner",
+        help=(
+            "Leave as None to just see how your own roster would change. Pick a partner to also "
+            "model their side: your 'give up' picks are credited to them, and 'acquire' options "
+            "are limited to their real assets, so you can see Before vs. After and Share of League "
+            "for both teams."
+        ),
+    )
+    partner_team = None if partner_choice == "None — one-sided sandbox" else partner_choice
+
     render_html(
         '<div class="gm-card">Nothing here is submitted or saved anywhere — this is a sandbox. '
         "Add anyone in the league to \"acquire,\" pull anyone off your own roster to \"give up,\" "
         "and see how your positional ranks, overall standing, and multi-year value trajectory would "
-        "shift. Giving up an asset just removes it from the pool here; this tool doesn't try to "
-        "model what the other side of a real trade would look like.</div>"
+        "shift."
+        + (
+            " With a trade partner selected, both sides of the deal are modeled below."
+            if partner_team else
+            " Giving up an asset just removes it from the pool here; pick a trade partner above "
+            "if you want to see the other side modeled too."
+        )
+        + '</div>'
     )
 
     give_pool = build_asset_pool(players, picks, include_teams=[my_team])
-    acquire_pool = build_asset_pool(players, picks, exclude_teams=[my_team], show_team_label=True)
+    if partner_team:
+        acquire_pool = build_asset_pool(players, picks, include_teams=[partner_team], show_team_label=True)
+    else:
+        acquire_pool = build_asset_pool(players, picks, exclude_teams=[my_team], show_team_label=True)
     acquire_pool.update(rookie_asset_pool(bundle, fc_rows, players, 2026))
     acquire_pool.update(devy_asset_pool(2027))
 
@@ -3419,64 +3514,19 @@ def render_roster_lab(
             f"&mdash; net {acquire_value - give_value:+,}.</div>"
         )
 
-    players_mod, picks_mod = apply_roster_moves(players, picks, my_team, give_assets, acquire_assets)
+    players_mod, picks_mod = apply_roster_moves(
+        players, picks, my_team, give_assets, acquire_assets, give_to_team=partner_team
+    )
     teams_mod = build_teams(players_mod, picks_mod)
 
-    current_row = teams[teams["Team"] == my_team].iloc[0]
-    projected_row = teams_mod[teams_mod["Team"] == my_team].iloc[0]
-
-    st.markdown("### Before vs. After")
-    cols = st.columns(2)
-    for col, row, label in zip(cols, [current_row, projected_row], ["Current", "Projected"]):
-        with col:
-            render_html(
-                f'<div class="gm-card"><b>{clean(label)}</b><br>'
-                f'Overall Rank: #{int(row["Overall_Rank"])} · Window: {clean(row["Window"])}<br>'
-                f'Total Value: {int(row["Total_Value"]):,} '
-                f'(Players {int(row["Player_Value"]):,} + Picks {int(row["Pick_Value"]):,})<br>'
-                f'Avg Age: {row["Avg_Age"]}<br>'
-                f'QB #{int(row["QB_Rank"])} · RB #{int(row["RB_Rank"])} · '
-                f'WR #{int(row["WR_Rank"])} · TE #{int(row["TE_Rank"])} · PICKS #{int(row["Pick_Rank"])}'
-                f'</div>'
-            )
-
-    if has_moves:
-        rank_delta = int(current_row["Overall_Rank"]) - int(projected_row["Overall_Rank"])
-        if rank_delta > 0:
-            st.caption(f"This move improves your overall rank by {rank_delta} spot(s) league-wide.")
-        elif rank_delta < 0:
-            st.caption(f"This move drops your overall rank by {abs(rank_delta)} spot(s) league-wide.")
-        else:
-            st.caption("This move leaves your overall rank unchanged league-wide.")
-
-    st.markdown("### Share of League")
-    st.caption(
-        "Value Share = your team's share of total league-wide dynasty value. Production Share = "
-        "share of value concentrated in your best possible starting lineup (real slot eligibility, "
-        "not bench) — a dynasty-value proxy, not real box-score production."
-    )
-    cur_prod_pct, cur_prod_rank = production_share(bundle, players, my_team)
-    cur_val_pct, cur_val_rank = value_share(teams, my_team)
-    proj_prod_pct, proj_prod_rank = production_share(bundle, players_mod, my_team)
-    proj_val_pct, proj_val_rank = value_share(teams_mod, my_team)
-
-    scol1, scol2 = st.columns(2)
-    with scol1:
-        st.markdown("**Current**")
-        render_html(
-            '<div class="share-card-row">'
-            + share_card_html("Production Share", "⚙️", cur_prod_pct, cur_prod_rank, "production")
-            + share_card_html("Value Share", "📈", cur_val_pct, cur_val_rank, "value")
-            + '</div>'
-        )
-    with scol2:
-        st.markdown("**Projected**")
-        render_html(
-            '<div class="share-card-row">'
-            + share_card_html("Production Share", "⚙️", proj_prod_pct, proj_prod_rank, "production")
-            + share_card_html("Value Share", "📈", proj_val_pct, proj_val_rank, "value")
-            + '</div>'
-        )
+    if partner_team:
+        tab1, tab2 = st.tabs([my_team, partner_team])
+        with tab1:
+            render_roster_impact_panel(bundle, my_team, teams, teams_mod, players, players_mod, my_team)
+        with tab2:
+            render_roster_impact_panel(bundle, partner_team, teams, teams_mod, players, players_mod, partner_team)
+    else:
+        render_roster_impact_panel(bundle, my_team, teams, teams_mod, players, players_mod, my_team)
 
     st.markdown("### Multi-Year Outlook")
     st.caption(
