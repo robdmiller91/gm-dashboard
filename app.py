@@ -4466,7 +4466,10 @@ def build_weekly_scores(league_id: str, roster_to_team: dict[int, str], through_
             if rid is None or pts is None:
                 continue
             rows.append({"Team": roster_to_team.get(int(rid), f"Roster {rid}"), "Week": wk, "Points": float(pts)})
-    return pd.DataFrame(rows)
+    # An empty list still needs real columns — pd.DataFrame([]) otherwise has
+    # zero columns at all, and any downstream weekly_scores["Team"] filter
+    # raises a KeyError rather than just returning nothing to work with.
+    return pd.DataFrame(rows, columns=["Team", "Week", "Points"])
 
 
 def current_matchup_info(
