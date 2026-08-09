@@ -1145,16 +1145,44 @@ def slot_value_multipliers(total_slots: int, round_no: int) -> dict[int, float]:
     return {slot: v / mean_raw for slot, v in raw.items()}
 
 
+def historical_win_pct(bundle: dict[str, Any], lookback_seasons: int = 3) -> dict[str, float]:
+    """Average win% per manager (by stable Sleeper user_id, not team name — names
+    change) across their last few completed seasons. Used to make future draft
+    slot estimates reflect actual team quality over time, not just whatever a
+    team's live record happens to be right now — which can be a tiny, noisy
+    sample early in a season or completely uninformative in the preseason.
+    """
+    league_id = str(bundle["league"].get("league_id") or LEAGUE_ID)
+    history = load_draft_history(league_id)
+    per_uid: dict[str, list[float]] = {}
+    for entry in history[: lookback_seasons + 1]:
+        for r in entry.get("rosters") or []:
+            settings = r.get("settings") or {}
+            wins = int(settings.get("wins") or 0)
+            losses = int(settings.get("losses") or 0)
+            ties = int(settings.get("ties") or 0)
+            games = wins + losses + ties
+            if games == 0:
+                continue
+            uid = str(r.get("owner_id"))
+            per_uid.setdefault(uid, []).append(wins / games)
+    return {uid: sum(v) / len(v) for uid, v in per_uid.items()}
+
+
 def resolve_slot_order(bundle: dict[str, Any], season: int, roster_to_team: dict[int, str]) -> dict[str, int]:
     """Best-known 1-indexed slot per team for a season's rookie draft: the official
     Sleeper draft order if the commissioner has set one, otherwise a standings-based
-    estimate (worst current record picks first) — same convention as Mock Draft."""
+    estimate (worst record picks first) — blending real season history with the
+    current live record, so an early-season small sample doesn't dominate.
+    """
     league_id = str(bundle["league"].get("league_id") or LEAGUE_ID)
     drafts = load_league_drafts(league_id)
     users = {str(u.get("user_id")): team_name(u) for u in bundle["users"]}
     official = official_draft_order(drafts, season, users)
     if official:
         return {t: i + 1 for i, t in enumerate(official)}
+
+    hist_win_pct = historical_win_pct(bundle)
 
     rows = []
     for r in bundle["rosters"]:
@@ -1163,10 +1191,23 @@ def resolve_slot_order(bundle: dict[str, Any], season: int, roster_to_team: dict
         losses = int(settings.get("losses") or 0)
         ties = int(settings.get("ties") or 0)
         fpts = float(settings.get("fpts") or 0) + float(settings.get("fpts_decimal") or 0) / 100
-        games = max(wins + losses + ties, 1)
+        games = wins + losses + ties
+        current_pct = wins / games if games > 0 else None
+        uid = str(r.get("owner_id"))
+        hist_pct = hist_win_pct.get(uid)
+
+        if current_pct is not None and hist_pct is not None:
+            blended = 0.5 * current_pct + 0.5 * hist_pct
+        elif hist_pct is not None:
+            blended = hist_pct
+        elif current_pct is not None:
+            blended = current_pct
+        else:
+            blended = 0.5  # no data at all — treat as a coin flip, not last or first
+
         team = roster_to_team.get(int(r["roster_id"]))
         if team:
-            rows.append((team, wins / games, fpts))
+            rows.append((team, blended, fpts))
     rows.sort(key=lambda x: (x[1], x[2]))
     return {team: i + 1 for i, (team, _, _) in enumerate(rows)}
 
