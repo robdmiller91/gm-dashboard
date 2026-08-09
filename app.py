@@ -1180,6 +1180,15 @@ def build_picks(bundle: dict[str, Any]) -> pd.DataFrame:
     current_season = int(league.get("season") or 2026)
     base_rounds = int((league.get("settings") or {}).get("draft_rounds") or 3)
 
+    # If this season's rookie draft has already completed, those picks have
+    # already been used — converted into real rostered players — and
+    # shouldn't still show up as available/tradeable draft capital.
+    league_id = str(league.get("league_id") or LEAGUE_ID)
+    current_season_drafted = any(
+        str(d.get("season")) == str(current_season) and d.get("status") == "complete"
+        for d in load_league_drafts(league_id)
+    )
+
     traded_seasons = {
         int(pick.get("season"))
         for pick in bundle["traded_picks"]
@@ -1196,6 +1205,14 @@ def build_picks(bundle: dict[str, Any]) -> pd.DataFrame:
         {current_season, current_season + 1, current_season + 2}
         | traded_seasons
     )
+    if current_season_drafted:
+        # That draft already happened — drop it regardless of whether old
+        # trade records still reference it, and extend the window by one
+        # year so there's still a full three-season horizon to look at.
+        seasons = [s for s in seasons if s != current_season]
+        if (current_season + 3) not in seasons:
+            seasons.append(current_season + 3)
+        seasons.sort()
     # A trade can reference a round beyond the league's current draft_rounds
     # setting (e.g. a 4th/5th-round rookie pick changing hands even though
     # the league currently runs a 3-round draft) — the grid needs to cover
