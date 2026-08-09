@@ -1760,8 +1760,11 @@ def render_weekly_dashboard(bundle: dict[str, Any], teams: pd.DataFrame, players
 
     state = load_nfl_state()
     season_type = state.get("season_type", "off")
-    current_week = int(state.get("week") or 1)
-    in_season = season_type in {"regular", "post"} and (state.get("season") == league.get("season"))
+    # During preseason, Sleeper's "week" reflects the preseason week, not
+    # Week 1 of the regular season — target Week 1 explicitly so the matchup
+    # lookup below finds real Week 1 pairings once they're set, rather than a
+    # meaningless preseason week number.
+    current_week = int(state.get("week") or 1) if season_type in {"regular", "post"} else 1
     completed_weeks = max(current_week - 1, 0) if season_type == "regular" else (17 if season_type == "post" else 0)
 
     st.markdown("### Weekly Dashboard")
@@ -1774,11 +1777,14 @@ def render_weekly_dashboard(bundle: dict[str, Any], teams: pd.DataFrame, players
     if not my_roster:
         st.info("Couldn't find a roster for this team.")
         return
-    if not in_season:
+
+    info = current_matchup_info(league_id, roster_to_team, my_roster, current_week)
+    has_matchup = bool(info and info.get("opp_team"))
+    if not has_matchup and completed_weeks == 0:
         render_html(
-            '<div class="gm-card">The season hasn\'t started yet (or Sleeper doesn\'t have live '
-            "state for it) — standings, matchups, and scoring will populate automatically once "
-            "Week 1 kicks off.</div>"
+            '<div class="gm-card">No matchup data from Sleeper yet for this league/season — '
+            "this will populate automatically once Week 1 matchups are set, even before kickoff. "
+            "Scores show 0.00 until games are actually played.</div>"
         )
         return
 
@@ -1816,8 +1822,7 @@ def render_weekly_dashboard(bundle: dict[str, Any], teams: pd.DataFrame, players
     colA, colB = st.columns([1.3, 1])
     with colA:
         st.markdown("#### This Week's Matchup")
-        info = current_matchup_info(league_id, roster_to_team, my_roster, current_week)
-        if not info or not info.get("opp_team"):
+        if not has_matchup:
             render_html('<div class="matchup-card">No matchup found for this week (bye week or playoffs may not include every team).</div>')
         else:
             my_pts = info["my_points"]
