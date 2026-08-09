@@ -797,6 +797,7 @@ st.markdown(
       background:var(--panel2);
     }
     .matchup-score { font-size:1.6rem; font-weight:900; }
+    .matchup-proj { font-size:.68rem; color:var(--muted); font-weight:700; margin-top:.15rem; }
     .matchup-label { font-size:.68rem; color:var(--muted); font-weight:700; }
     .matchup-vs {
       width:32px;
@@ -1829,15 +1830,39 @@ def render_weekly_dashboard(bundle: dict[str, Any], teams: pd.DataFrame, players
             opp_pts = info["opp_points"]
             my_label = f"{my_pts:.2f}" if my_pts is not None else "0.00"
             opp_label = f"{opp_pts:.2f}" if opp_pts is not None else "0.00"
+
+            opp_roster = next(
+                (r for r in bundle["rosters"] if int(r["roster_id"]) == info.get("opp_roster_id")), None
+            )
+            my_proj = project_lineup_points(league_id, my_roster, completed_weeks)
+            opp_proj = project_lineup_points(league_id, opp_roster, completed_weeks) if opp_roster else None
+            my_proj_html = (
+                f'<div class="matchup-proj">Proj: {my_proj:.2f}</div>' if my_proj is not None else ""
+            )
+            opp_proj_html = (
+                f'<div class="matchup-proj">Proj: {opp_proj:.2f}</div>' if opp_proj is not None else ""
+            )
+
             render_html(
                 f'<div class="matchup-card"><div class="matchup-row">'
                 f'<div class="matchup-team"><div class="matchup-label">{clean(team)}</div>'
-                f'<div class="matchup-score">{my_label}</div></div>'
+                f'<div class="matchup-score">{my_label}</div>{my_proj_html}</div>'
                 f'<div class="matchup-vs">VS</div>'
                 f'<div class="matchup-team"><div class="matchup-label">{clean(info["opp_team"])}</div>'
-                f'<div class="matchup-score">{opp_label}</div></div>'
+                f'<div class="matchup-score">{opp_label}</div>{opp_proj_html}</div>'
                 f'</div></div>'
             )
+            if my_proj is None:
+                st.caption(
+                    "Projections need at least one completed week of season data — "
+                    "this is our own season-average sketch, not a licensed projection."
+                )
+            else:
+                st.caption(
+                    "Proj = each starter's own season-average points so far, summed — a simple "
+                    "self-computed sketch (no injuries, matchup, or Vegas lines factored in), "
+                    "not a licensed projection."
+                )
 
         st.markdown("#### Weekly Points — You vs. League Median")
         if weekly_scores.empty:
@@ -4490,8 +4515,39 @@ def current_matchup_info(
         "my_points": my_entry.get("points"),
         "opp_points": opp_entry.get("points") if opp_entry else None,
         "opp_team": roster_to_team.get(int(opp_entry["roster_id"])) if opp_entry else None,
+        "opp_roster_id": int(opp_entry["roster_id"]) if opp_entry else None,
         "players_points": my_entry.get("players_points") or {},
     }
+
+
+def project_lineup_points(league_id: str, roster: dict[str, Any], through_week: int) -> float | None:
+    """A simple, self-computed projection for a roster's currently configured
+    starters: each starter's average points across completed weeks this season,
+    summed. This is NOT a licensed projection (no injury news, matchup context,
+    or Vegas lines factored in) — just a season-average sketch, and it returns
+    None until there's at least one completed week to average from.
+    """
+    if through_week <= 0:
+        return None
+    week_pts_by_player: dict[str, list[float]] = {}
+    for wk in range(1, through_week + 1):
+        for m in load_matchups(league_id, wk):
+            if int(m.get("roster_id", -1)) != int(roster["roster_id"]):
+                continue
+            for pid, pts in (m.get("players_points") or {}).items():
+                week_pts_by_player.setdefault(pid, []).append(float(pts))
+    if not week_pts_by_player:
+        return None
+    starter_ids = [str(x) for x in (roster.get("starters") or []) if x and x != "0"]
+    if not starter_ids:
+        return None
+    total, counted = 0.0, 0
+    for pid in starter_ids:
+        vals = week_pts_by_player.get(pid)
+        if vals:
+            total += sum(vals) / len(vals)
+            counted += 1
+    return total if counted > 0 else None
 
 
 def compute_optimal_lineup_points(bundle: dict[str, Any], roster: dict[str, Any], week_points: dict[str, float]) -> float | None:
