@@ -1183,11 +1183,34 @@ def build_picks(bundle: dict[str, Any]) -> pd.DataFrame:
     # If this season's rookie draft has already completed, those picks have
     # already been used — converted into real rostered players — and
     # shouldn't still show up as available/tradeable draft capital.
+    #
+    # Don't anchor this to league.season at all — that field isn't always
+    # bumped to the new year immediately once a season rolls over, and if
+    # it's stale, comparing against it would silently miss a draft that
+    # already happened. Instead, check every draft object Sleeper has for
+    # this league on its own terms (its own "season" field), and cross-verify
+    # completion against real pick results, not just a status string.
     league_id = str(league.get("league_id") or LEAGUE_ID)
-    current_season_drafted = any(
-        str(d.get("season")) == str(current_season) and d.get("status") == "complete"
-        for d in load_league_drafts(league_id)
-    )
+    total_teams = len(roster_to_team) or 12
+    drafted_seasons: set[int] = set()
+    for d in load_league_drafts(league_id):
+        try:
+            d_season = int(d.get("season"))
+        except (TypeError, ValueError):
+            continue
+        is_complete = d.get("status") == "complete"
+        if not is_complete:
+            draft_id = d.get("draft_id")
+            if draft_id:
+                try:
+                    picks_raw = get_json(f"{SLEEPER_BASE}/draft/{draft_id}/picks")
+                except DataError:
+                    picks_raw = []
+                expected_rounds = int((d.get("settings") or {}).get("rounds") or 0)
+                expected_total = expected_rounds * total_teams
+                is_complete = bool(picks_raw) and bool(expected_total) and len(picks_raw) >= expected_total
+        if is_complete:
+            drafted_seasons.add(d_season)
 
     traded_seasons = {
         int(pick.get("season"))
@@ -1205,14 +1228,17 @@ def build_picks(bundle: dict[str, Any]) -> pd.DataFrame:
         {current_season, current_season + 1, current_season + 2}
         | traded_seasons
     )
-    if current_season_drafted:
-        # That draft already happened — drop it regardless of whether old
-        # trade records still reference it, and extend the window by one
-        # year so there's still a full three-season horizon to look at.
-        seasons = [s for s in seasons if s != current_season]
-        if (current_season + 3) not in seasons:
-            seasons.append(current_season + 3)
-        seasons.sort()
+    if drafted_seasons:
+        # Those drafts already happened — drop them regardless of whether old
+        # trade records still reference them, and top the window back up to a
+        # full three forward-looking seasons.
+        seasons = [s for s in seasons if s not in drafted_seasons]
+        candidate = (max(seasons) if seasons else current_season) + 1
+        while len(seasons) < 3:
+            if candidate not in seasons and candidate not in drafted_seasons:
+                seasons.append(candidate)
+            candidate += 1
+        seasons = sorted(seasons)
     # A trade can reference a round beyond the league's current draft_rounds
     # setting (e.g. a 4th/5th-round rookie pick changing hands even though
     # the league currently runs a 3-round draft) — the grid needs to cover
@@ -1227,12 +1253,17 @@ def build_picks(bundle: dict[str, Any]) -> pd.DataFrame:
 
     for pick in bundle["traded_picks"]:
         try:
-            key = (int(pick["season"]), int(pick["round"]), int(pick["roster_id"]))
+            pick_season = int(pick["season"])
+            key = (pick_season, int(pick["round"]), int(pick["roster_id"]))
             owner = int(pick["owner_id"])
         except (KeyError, TypeError, ValueError):
             continue
-        # Apply every real trade unconditionally — don't require the key to
-        # already exist in the grid, or genuine trades silently vanish.
+        if pick_season in drafted_seasons:
+            # That draft already happened — this pick has been spent, so
+            # don't let old trade history resurrect it onto the board.
+            continue
+        # Apply every other real trade unconditionally — don't require the
+        # key to already exist in the grid, or genuine trades silently vanish.
         ownership[key] = owner
 
     year_factor = {current_season: 1.0, current_season + 1: 0.88, current_season + 2: 0.76}
