@@ -1919,11 +1919,14 @@ def render_weekly_dashboard(bundle: dict[str, Any], teams: pd.DataFrame, players
                 (r for r in bundle["rosters"] if int(r["roster_id"]) == info.get("opp_roster_id")), None
             )
             proj_season = int(state.get("season") or league.get("season") or 2026)
+            scoring_settings = league.get("scoring_settings") or {}
             my_proj, my_proj_source = project_lineup_points(
-                league_id, my_roster, completed_weeks, proj_season, current_week
+                league_id, my_roster, completed_weeks, proj_season, current_week, scoring_settings
             )
             opp_proj, opp_proj_source = (
-                project_lineup_points(league_id, opp_roster, completed_weeks, proj_season, current_week)
+                project_lineup_points(
+                    league_id, opp_roster, completed_weeks, proj_season, current_week, scoring_settings
+                )
                 if opp_roster else (None, "none")
             )
             my_proj_html = (
@@ -2109,7 +2112,7 @@ def render_league_projections(bundle: dict[str, Any], teams: pd.DataFrame, playe
     if board.empty:
         st.info(f"No schedule data available for Week {week_choice} yet.")
     else:
-        sleeper_proj = load_sleeper_projections(proj_season, week_choice)
+        sleeper_proj = load_sleeper_projections(proj_season, week_choice, league.get("scoring_settings"))
         season_avg = build_player_avg_lookup(league_id, completed_weeks) if completed_weeks > 0 else {}
         combined_proj = {**season_avg, **sleeper_proj}
         roster_by_id = {int(r["roster_id"]): r for r in bundle["rosters"]}
@@ -4806,16 +4809,23 @@ def current_matchup_info(
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def load_sleeper_projections(season: int, week: int) -> dict[str, float]:
-    """Sleeper's own weekly point projections — the same numbers Sleeper's own
-    app shows before kickoff. This lives on a different URL shape than the
-    rest of this app's Sleeper calls (no /v1 prefix, season_type as a query
-    param, e.g. api.sleeper.app/projections/nfl/<season>/<week>?season_type=
-    regular) and its exact response shape isn't officially documented — some
-    sources describe a flat list of {player_id, stats} objects, others a dict
-    keyed directly by player_id. Parsed defensively to handle either; any
-    truly unexpected shape just yields an empty dict, triggering a graceful
-    fallback to our own season-average sketch.
+def load_sleeper_raw_projections(season: int, week: int) -> dict[str, dict[str, float]]:
+    """Sleeper's own weekly projections — RAW stat lines per player (pass_yd,
+    pass_td, rec, rec_yd, etc.), not a pre-computed point total. This lives on
+    a different URL shape than the rest of this app's Sleeper calls (no /v1
+    prefix, season_type as a query param) and its exact response shape isn't
+    officially documented — some sources describe a flat list of
+    {player_id, stats} objects, others a dict keyed directly by player_id.
+    Parsed defensively to handle either; any truly unexpected shape just
+    yields an empty dict, triggering a graceful fallback to our own
+    season-average sketch.
+
+    Raw stats are kept separate from scoring on purpose: Sleeper's public
+    endpoint only exposes generic pts_std/pts_half_ppr/pts_ppr, which won't
+    match what Sleeper's own app displays for a league with any custom
+    scoring rules (non-standard PPR value, TE premium, bonus thresholds,
+    etc.) — scoring the raw stat line against this league's actual
+    scoring_settings gets much closer to what you'd see in Sleeper itself.
     """
     url = f"https://api.sleeper.app/projections/nfl/{season}/{week}?season_type=regular"
     try:
@@ -4823,19 +4833,21 @@ def load_sleeper_projections(season: int, week: int) -> dict[str, float]:
     except DataError:
         return {}
 
-    def extract_pts(stats_obj: Any) -> float | None:
-        if not isinstance(stats_obj, dict):
+    def extract_stat_line(entry: Any) -> dict[str, float] | None:
+        stats = entry.get("stats") if isinstance(entry, dict) else None
+        if not isinstance(stats, dict):
+            stats = entry if isinstance(entry, dict) else None
+        if not isinstance(stats, dict):
             return None
-        for key in ("pts_ppr", "pts_half_ppr", "pts_std"):
-            v = stats_obj.get(key)
-            if v is not None:
-                try:
-                    return float(v)
-                except (TypeError, ValueError):
-                    continue
-        return None
+        out = {}
+        for k, v in stats.items():
+            try:
+                out[k] = float(v)
+            except (TypeError, ValueError):
+                continue
+        return out or None
 
-    projections: dict[str, float] = {}
+    raw: dict[str, dict[str, float]] = {}
     if isinstance(data, list):
         for entry in data:
             if not isinstance(entry, dict):
@@ -4843,23 +4855,63 @@ def load_sleeper_projections(season: int, week: int) -> dict[str, float]:
             pid = entry.get("player_id")
             if pid is None:
                 pid = (entry.get("player") or {}).get("player_id")
-            pts = extract_pts(entry.get("stats")) or extract_pts(entry)
-            if pid is not None and pts is not None:
-                projections[str(pid)] = pts
+            stat_line = extract_stat_line(entry)
+            if pid is not None and stat_line:
+                raw[str(pid)] = stat_line
     elif isinstance(data, dict):
         for pid, entry in data.items():
-            if not isinstance(entry, dict):
-                continue
-            pts = extract_pts(entry.get("stats")) or extract_pts(entry)
-            if pts is not None:
-                projections[str(pid)] = pts
+            stat_line = extract_stat_line(entry)
+            if stat_line:
+                raw[str(pid)] = stat_line
 
+    return raw
+
+
+def score_stat_line(stat_line: dict[str, float], scoring_settings: dict[str, Any]) -> float | None:
+    """Generic fantasy-point scorer: Sleeper's stat-line keys (pass_yd,
+    pass_td, rec, rec_yd, fum_lost, etc.) line up directly with the keys in
+    scoring_settings, so a plain dot-product between the two reproduces
+    whatever custom scoring rules this league actually uses — the same way
+    Sleeper computes it internally — rather than assuming generic full PPR.
+    """
+    if not stat_line or not scoring_settings:
+        return None
+    total = 0.0
+    matched = False
+    for stat_key, value in stat_line.items():
+        weight = scoring_settings.get(stat_key)
+        if weight is None:
+            continue
+        try:
+            total += float(value) * float(weight)
+            matched = True
+        except (TypeError, ValueError):
+            continue
+    return total if matched else None
+
+
+def load_sleeper_projections(
+    season: int, week: int, scoring_settings: dict[str, Any] | None = None
+) -> dict[str, float]:
+    """Player -> projected points for a week, scored against this league's
+    real scoring settings when available (falling back to Sleeper's generic
+    full-PPR total per player if custom scoring can't be computed for them).
+    """
+    raw = load_sleeper_raw_projections(season, week)
+    projections: dict[str, float] = {}
+    for pid, stat_line in raw.items():
+        pts = score_stat_line(stat_line, scoring_settings) if scoring_settings else None
+        if pts is None:
+            pts = stat_line.get("pts_ppr") or stat_line.get("pts_half_ppr") or stat_line.get("pts_std")
+        if pts is not None:
+            projections[pid] = float(pts)
     return projections
 
 
 def project_lineup_points(
     league_id: str, roster: dict[str, Any], through_week: int,
     season: int | None = None, week: int | None = None,
+    scoring_settings: dict[str, Any] | None = None,
 ) -> tuple[float | None, str]:
     """Projected total for a roster's currently configured starters.
 
@@ -4875,7 +4927,7 @@ def project_lineup_points(
         return None, "none"
 
     if season is not None and week is not None:
-        sleeper_proj = load_sleeper_projections(season, week)
+        sleeper_proj = load_sleeper_projections(season, week, scoring_settings)
         if sleeper_proj and any(pid in sleeper_proj for pid in starter_ids):
             total = sum(sleeper_proj.get(pid, 0.0) for pid in starter_ids)
             return total, "sleeper"
@@ -5278,30 +5330,6 @@ def matchup_win_probability(mean_a: float, mean_b: float, std_a: float = 35.0, s
     return 0.5 * (1 + math.erf(z / math.sqrt(2)))
 
 
-def build_player_season_projections(
-    league_id: str, sleeper_id: str, season: int, weeks: list[int]
-) -> pd.DataFrame:
-    """One row per week for a single player: Sleeper's own projection (if
-    available) and the real actual score once that week has been played.
-    Useful both as a game-log-style view and as a direct way to confirm
-    whether Sleeper's projections endpoint is actually returning real data
-    for this league — if every 'Projected' cell comes back empty, the
-    endpoint likely isn't available the way we're calling it.
-    """
-    rows = []
-    for wk in weeks:
-        proj_map = load_sleeper_projections(season, wk)
-        proj = proj_map.get(sleeper_id)
-        actual = None
-        for m in load_matchups(league_id, wk):
-            pts = (m.get("players_points") or {}).get(sleeper_id)
-            if pts is not None:
-                actual = float(pts)
-                break
-        rows.append({"Week": wk, "Projected": proj, "Actual": actual})
-    return pd.DataFrame(rows)
-
-
 def build_full_week_board(
     bundle: dict[str, Any], week: int, roster_to_team: dict[int, str],
     season: int, completed_weeks: int,
@@ -5315,7 +5343,7 @@ def build_full_week_board(
     if not matchups:
         return pd.DataFrame()
 
-    sleeper_proj = load_sleeper_projections(season, week)
+    sleeper_proj = load_sleeper_projections(season, week, bundle["league"].get("scoring_settings"))
     season_avg = build_player_avg_lookup(league_id, completed_weeks) if completed_weeks > 0 else {}
     combined_proj = {**season_avg, **sleeper_proj}  # Sleeper's real numbers win where both exist
 
