@@ -1875,8 +1875,14 @@ def render_weekly_dashboard(bundle: dict[str, Any], teams: pd.DataFrame, players
             opp_roster = next(
                 (r for r in bundle["rosters"] if int(r["roster_id"]) == info.get("opp_roster_id")), None
             )
-            my_proj = project_lineup_points(league_id, my_roster, completed_weeks)
-            opp_proj = project_lineup_points(league_id, opp_roster, completed_weeks) if opp_roster else None
+            proj_season = int(state.get("season") or league.get("season") or 2026)
+            my_proj, my_proj_source = project_lineup_points(
+                league_id, my_roster, completed_weeks, proj_season, current_week
+            )
+            opp_proj, opp_proj_source = (
+                project_lineup_points(league_id, opp_roster, completed_weeks, proj_season, current_week)
+                if opp_roster else (None, "none")
+            )
             my_proj_html = (
                 f'<div class="matchup-proj">Proj: {my_proj:.2f}</div>' if my_proj is not None else ""
             )
@@ -1893,16 +1899,19 @@ def render_weekly_dashboard(bundle: dict[str, Any], teams: pd.DataFrame, players
                 f'<div class="matchup-score">{opp_label}</div>{opp_proj_html}</div>'
                 f'</div></div>'
             )
-            if my_proj is None:
+            proj_source = "sleeper" if "sleeper" in {my_proj_source, opp_proj_source} else my_proj_source
+            if proj_source == "sleeper":
+                st.caption("Proj = Sleeper's own weekly projections.")
+            elif proj_source == "season_avg":
                 st.caption(
-                    "Projections need at least one completed week of season data — "
-                    "this is our own season-average sketch, not a licensed projection."
+                    "Sleeper's own weekly projections weren't available, so Proj falls back to each "
+                    "starter's own season-average points so far, summed — a simple self-computed "
+                    "sketch (no injuries, matchup, or Vegas lines factored in), not a licensed projection."
                 )
             else:
                 st.caption(
-                    "Proj = each starter's own season-average points so far, summed — a simple "
-                    "self-computed sketch (no injuries, matchup, or Vegas lines factored in), "
-                    "not a licensed projection."
+                    "Projections need Sleeper's projections endpoint or at least one completed week "
+                    "of season data — neither is available yet."
                 )
 
         st.markdown("#### Weekly Points — You vs. League Median")
@@ -4561,15 +4570,62 @@ def current_matchup_info(
     }
 
 
-def project_lineup_points(league_id: str, roster: dict[str, Any], through_week: int) -> float | None:
-    """A simple, self-computed projection for a roster's currently configured
-    starters: each starter's average points across completed weeks this season,
-    summed. This is NOT a licensed projection (no injury news, matchup context,
-    or Vegas lines factored in) — just a season-average sketch, and it returns
-    None until there's at least one completed week to average from.
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_sleeper_projections(season: int, week: int) -> dict[str, float]:
+    """Sleeper's own weekly point projections, if available via their public API —
+    the same numbers Sleeper's own app shows before kickoff. This isn't a
+    confirmed-stable endpoint (untested against live data), so it's parsed
+    defensively: any unexpected response shape just yields an empty dict,
+    which triggers a graceful fallback to our own season-average sketch.
     """
+    try:
+        data = get_json(f"{SLEEPER_BASE}/projections/nfl/regular/{season}/{week}")
+    except DataError:
+        return {}
+    if not isinstance(data, list):
+        return {}
+    projections: dict[str, float] = {}
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        pid = entry.get("player_id")
+        stats = entry.get("stats") or {}
+        pts = stats.get("pts_ppr")
+        if pts is None:
+            pts = stats.get("pts_half_ppr") or stats.get("pts_std")
+        if pid is not None and pts is not None:
+            try:
+                projections[str(pid)] = float(pts)
+            except (TypeError, ValueError):
+                continue
+    return projections
+
+
+def project_lineup_points(
+    league_id: str, roster: dict[str, Any], through_week: int,
+    season: int | None = None, week: int | None = None,
+) -> tuple[float | None, str]:
+    """Projected total for a roster's currently configured starters.
+
+    Tries Sleeper's own real weekly projections first (source="sleeper") —
+    the same numbers Sleeper's own app shows. Falls back to a self-computed
+    season-average sketch (source="season_avg") if that's not available: no
+    injury news, matchup context, or Vegas lines factored in, just each
+    starter's own average points across completed weeks. Returns
+    (None, "none") if there's nothing to work with either way.
+    """
+    starter_ids = [str(x) for x in (roster.get("starters") or []) if x and x != "0"]
+    if not starter_ids:
+        return None, "none"
+
+    if season is not None and week is not None:
+        sleeper_proj = load_sleeper_projections(season, week)
+        if sleeper_proj and any(pid in sleeper_proj for pid in starter_ids):
+            total = sum(sleeper_proj.get(pid, 0.0) for pid in starter_ids)
+            return total, "sleeper"
+
     if through_week <= 0:
-        return None
+        return None, "none"
     week_pts_by_player: dict[str, list[float]] = {}
     for wk in range(1, through_week + 1):
         for m in load_matchups(league_id, wk):
@@ -4578,17 +4634,14 @@ def project_lineup_points(league_id: str, roster: dict[str, Any], through_week: 
             for pid, pts in (m.get("players_points") or {}).items():
                 week_pts_by_player.setdefault(pid, []).append(float(pts))
     if not week_pts_by_player:
-        return None
-    starter_ids = [str(x) for x in (roster.get("starters") or []) if x and x != "0"]
-    if not starter_ids:
-        return None
+        return None, "none"
     total, counted = 0.0, 0
     for pid in starter_ids:
         vals = week_pts_by_player.get(pid)
         if vals:
             total += sum(vals) / len(vals)
             counted += 1
-    return total if counted > 0 else None
+    return (total, "season_avg") if counted > 0 else (None, "none")
 
 
 def compute_optimal_lineup_points(bundle: dict[str, Any], roster: dict[str, Any], week_points: dict[str, float]) -> float | None:
