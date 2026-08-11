@@ -842,6 +842,8 @@ st.markdown(
       padding:.25rem 0;
     }
     .matchup-label { font-size:.68rem; color:var(--muted); font-weight:700; }
+    .matchup-winner .matchup-label { color:#3ddc84; }
+    .matchup-winner .matchup-score { color:#3ddc84; }
     .matchup-vs {
       width:32px;
       height:32px;
@@ -2125,19 +2127,24 @@ def render_league_projections(bundle: dict[str, Any], teams: pd.DataFrame, playe
             label_a = f"{proj_a:.1f}" if proj_a is not None else "—"
             label_b = f"{proj_b:.1f}" if proj_b is not None else "—"
             win_a, win_b = row["Win % A"], row["Win % B"]
+            a_favored = win_a >= win_b
+            class_a = "matchup-team matchup-winner" if a_favored else "matchup-team"
+            class_b = "matchup-team" if a_favored else "matchup-team matchup-winner"
+            fill_left_class = "matchup-prob-fill-a" if a_favored else "matchup-prob-fill-b"
+            fill_right_class = "matchup-prob-fill-b" if a_favored else "matchup-prob-fill-a"
             render_html(
                 f'<div class="matchup-card"><div class="matchup-row">'
-                f'<div class="matchup-team"><div class="matchup-label">{clean(row["Team A"])}</div>'
+                f'<div class="{class_a}"><div class="matchup-label">{clean(row["Team A"])}</div>'
                 f'<div class="matchup-score">{label_a}</div></div>'
                 f'<div class="matchup-vs">VS</div>'
-                f'<div class="matchup-team"><div class="matchup-label">{clean(row["Team B"])}</div>'
+                f'<div class="{class_b}"><div class="matchup-label">{clean(row["Team B"])}</div>'
                 f'<div class="matchup-score">{label_b}</div></div>'
                 f'</div>'
                 f'<div class="matchup-prob-row">'
                 f'<span class="matchup-prob-pct">{win_a:.0f}%</span>'
                 f'<div class="matchup-prob-track">'
-                f'<div class="matchup-prob-fill-a" style="width:{win_a:.0f}%"></div>'
-                f'<div class="matchup-prob-fill-b" style="width:{win_b:.0f}%"></div>'
+                f'<div class="{fill_left_class}" style="width:{win_a:.0f}%"></div>'
+                f'<div class="{fill_right_class}" style="width:{win_b:.0f}%"></div>'
                 f'</div>'
                 f'<span class="matchup-prob-pct">{win_b:.0f}%</span>'
                 f'</div></div>'
