@@ -1807,7 +1807,7 @@ def render_weekly_dashboard(bundle: dict[str, Any], teams: pd.DataFrame, players
     # lookup below finds real Week 1 pairings once they're set, rather than a
     # meaningless preseason week number.
     current_week = int(state.get("week") or 1) if season_type in {"regular", "post"} else 1
-    completed_weeks = max(current_week - 1, 0) if season_type == "regular" else (17 if season_type == "post" else 0)
+    completed_weeks = detect_completed_weeks(league_id)
 
     st.markdown("### Weekly Dashboard")
     st.caption(
@@ -2041,7 +2041,7 @@ def render_league_projections(bundle: dict[str, Any], teams: pd.DataFrame) -> No
     state = load_nfl_state()
     season_type = state.get("season_type", "off")
     current_week = int(state.get("week") or 1) if season_type in {"regular", "post"} else 1
-    completed_weeks = max(current_week - 1, 0) if season_type == "regular" else (17 if season_type == "post" else 0)
+    completed_weeks = detect_completed_weeks(league_id)
     proj_season = int(state.get("season") or league.get("season") or 2026)
     playoff_week_start = int((league.get("settings") or {}).get("playoff_week_start") or 15)
 
@@ -4650,6 +4650,28 @@ def load_matchups(league_id: str, week: int) -> list[dict[str, Any]]:
         return get_json(f"{SLEEPER_BASE}/league/{league_id}/matchups/{week}")
     except DataError:
         return []
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def detect_completed_weeks(league_id: str, max_check: int = 18) -> int:
+    """How many weeks actually have real completed scores, determined by
+    checking Sleeper's matchup data directly rather than trusting
+    season_type/week classification fields, which have proven unreliable —
+    this is more robust to whatever exact state Sleeper's state endpoint is in.
+    """
+    completed = 0
+    for wk in range(1, max_check + 1):
+        matchups = load_matchups(league_id, wk)
+        if not matchups:
+            break
+        has_real_points = any(
+            m.get("points") is not None and float(m.get("points") or 0) > 0
+            for m in matchups
+        )
+        if not has_real_points:
+            break
+        completed = wk
+    return completed
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
