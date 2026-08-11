@@ -5132,9 +5132,32 @@ def simulate_playoff_odds(bundle: dict[str, Any], teams_scores: pd.DataFrame, te
         ranked = sorted(all_teams, key=lambda t: -base_wins.get(t, 0))
         return 100.0 if team in ranked[:playoff_teams_n] else 0.0
 
+    # No real weekly scoring history yet? Fall back to real per-player
+    # projections (same source as the Week-by-Week board) instead of an
+    # identical flat number for every team — otherwise every team looks the
+    # same and the odds are just random trial noise, not a real estimate.
+    proj_fallback_mean: dict[str, float] = {}
+    if stats.empty:
+        proj_season = int(bundle["league"].get("season") or 2026)
+        sleeper_proj = load_sleeper_projections(
+            proj_season, current_week, bundle["league"].get("scoring_settings")
+        )
+        if sleeper_proj:
+            for r in bundle["rosters"]:
+                t_name = roster_to_team.get(int(r["roster_id"]))
+                if not t_name:
+                    continue
+                proj = optimal_projected_lineup(bundle, r, sleeper_proj)
+                if proj is not None:
+                    proj_fallback_mean[t_name] = proj
+
     def team_score(t: str) -> float:
-        mean = stats.loc[t, "mean"] if t in stats.index else 100.0
-        std = max(stats.loc[t, "std"] if t in stats.index else 15.0, 8.0)
+        if t in stats.index and pd.notna(stats.loc[t, "mean"]):
+            mean = float(stats.loc[t, "mean"])
+            std = max(float(stats.loc[t, "std"]) if pd.notna(stats.loc[t, "std"]) else 30.0, 8.0)
+        else:
+            mean = proj_fallback_mean.get(t, 100.0)
+            std = 30.0
         return random.gauss(mean, std)
 
     makes_playoffs = 0
@@ -5239,12 +5262,44 @@ def simulate_full_league(
     }
     stats = teams_scores.groupby("Team")["Points"].agg(["mean", "std"]) if not teams_scores.empty else pd.DataFrame()
 
+    # No real weekly scoring history yet (e.g. preseason, 0 completed weeks)?
+    # Falling back to an identical flat number for every team would make the
+    # whole simulation statistically meaningless — every team indistinguishable,
+    # "champion" and "worst record" just random trial noise. Instead, fall back
+    # to each team's real optimal-lineup PROJECTED total (the same Sleeper
+    # per-player projections powering the Week-by-Week board), which actually
+    # differentiates rosters even before any games have been played.
+    proj_fallback_mean: dict[str, float] = {}
+    if stats.empty:
+        proj_season = int(bundle["league"].get("season") or 2026)
+        sleeper_proj = load_sleeper_projections(
+            proj_season, current_week, bundle["league"].get("scoring_settings")
+        )
+        if sleeper_proj:
+            for r in bundle["rosters"]:
+                team = roster_to_team.get(int(r["roster_id"]))
+                if not team:
+                    continue
+                proj = optimal_projected_lineup(bundle, r, sleeper_proj)
+                if proj is not None:
+                    proj_fallback_mean[team] = proj
+
     def team_mean(t: str) -> float:
-        base = float(stats.loc[t, "mean"]) if t in stats.index else 100.0
+        if t in stats.index and pd.notna(stats.loc[t, "mean"]):
+            base = float(stats.loc[t, "mean"])
+        elif t in proj_fallback_mean:
+            base = proj_fallback_mean[t]
+        else:
+            base = 100.0
         return base * (1 + mean_adjustments.get(t, 0.0) / 100.0)
 
     def team_std(t: str) -> float:
-        base = float(stats.loc[t, "std"]) if t in stats.index else 15.0
+        if t in stats.index and pd.notna(stats.loc[t, "std"]):
+            base = float(stats.loc[t, "std"])
+        else:
+            # No real variance data yet — a generic full-lineup weekly std,
+            # calibrated earlier against real dynasty-tool win% displays.
+            base = 30.0
         return max(base, 8.0) * variance_mult
 
     remaining_schedule = []
