@@ -817,6 +817,30 @@ st.markdown(
     }
     .matchup-prob-fill-a { background:#3ddc84; height:100%; }
     .matchup-prob-fill-b { background:#ff6b6b; height:100%; }
+    .lineup-compare-row {
+      display:grid;
+      grid-template-columns: 1fr 60px 1fr;
+      gap:.5rem;
+      align-items:center;
+      padding:.4rem 0;
+      border-bottom:1px solid var(--border);
+      font-size:.78rem;
+    }
+    .lineup-compare-row:last-child { border-bottom:none; }
+    .lineup-compare-side { display:flex; flex-direction:column; }
+    .lineup-compare-side.right { text-align:right; align-items:flex-end; }
+    .lineup-compare-name { font-weight:800; }
+    .lineup-compare-meta { font-size:.66rem; color:var(--muted); }
+    .lineup-compare-pts { font-weight:900; font-size:.85rem; margin-top:.1rem; }
+    .lineup-compare-slot {
+      text-align:center;
+      font-size:.62rem;
+      font-weight:900;
+      color:var(--muted);
+      background:var(--panel2);
+      border-radius:6px;
+      padding:.25rem 0;
+    }
     .matchup-label { font-size:.68rem; color:var(--muted); font-weight:700; }
     .matchup-vs {
       width:32px;
@@ -2085,6 +2109,14 @@ def render_league_projections(bundle: dict[str, Any], teams: pd.DataFrame, playe
     if board.empty:
         st.info(f"No schedule data available for Week {week_choice} yet.")
     else:
+        sleeper_proj = load_sleeper_projections(proj_season, week_choice)
+        season_avg = build_player_avg_lookup(league_id, completed_weeks) if completed_weeks > 0 else {}
+        combined_proj = {**season_avg, **sleeper_proj}
+        roster_by_id = {int(r["roster_id"]): r for r in bundle["rosters"]}
+        canonical_slots = [
+            s for s in (league.get("roster_positions") or []) if s not in ("BN", "IR", "TAXI")
+        ]
+
         for _, row in board.sort_values("Proj A", ascending=False, na_position="last").iterrows():
             proj_a, proj_b = row["Proj A"], row["Proj B"]
             label_a = f"{proj_a:.1f}" if proj_a is not None else "—"
@@ -2108,39 +2140,36 @@ def render_league_projections(bundle: dict[str, Any], teams: pd.DataFrame, playe
                 f'</div></div>'
             )
 
-    st.divider()
-    st.markdown("### Player Weekly Projections")
-    st.caption(
-        "A full-season, game-log-style view for one player — Sleeper's own projection per week "
-        "plus the real actual score once that week's been played. Also a direct way to confirm "
-        "whether Sleeper's projections endpoint is returning real numbers for this league: if every "
-        "row comes back blank, it likely isn't available the way we're calling it."
-    )
-    rostered_players = players[players["Value"] > 0].sort_values("Player")
-    player_options = rostered_players["Player"].tolist()
-    if not player_options:
-        st.info("No rostered players found.")
-    else:
-        player_choice = st.selectbox("Player", player_options, key="league_proj_player")
-        prow = rostered_players[rostered_players["Player"] == player_choice].iloc[0]
-        sleeper_id = str(prow["Sleeper ID"])
-        season_weeks = list(range(1, max_week))
-        with st.spinner(f"Loading {player_choice}'s weekly projections..."):
-            proj_table = build_player_season_projections(league_id, sleeper_id, proj_season, season_weeks)
-        display_table = proj_table.copy()
-        display_table["Projected"] = display_table["Projected"].map(
-            lambda v: f"{v:.2f}" if pd.notna(v) else "—"
-        )
-        display_table["Actual"] = display_table["Actual"].map(
-            lambda v: f"{v:.2f}" if pd.notna(v) else "—"
-        )
-        st.dataframe(display_table, hide_index=True, use_container_width=True)
-        if proj_table["Projected"].notna().sum() == 0:
-            st.warning(
-                "Every projection came back empty for this player across the whole season — "
-                "Sleeper's projections endpoint likely isn't returning data the way this app expects "
-                "it to. Real actual scores (once games are played) aren't affected by this."
-            )
+            with st.expander(f"Player-by-player: {row['Team A']} vs {row['Team B']}"):
+                roster_a = roster_by_id.get(int(row["Roster ID A"])) if row["Roster ID A"] is not None else None
+                roster_b = roster_by_id.get(int(row["Roster ID B"])) if row["Roster ID B"] is not None else None
+                assign_a = optimal_lineup_assignment(bundle, roster_a, combined_proj) if roster_a else []
+                assign_b = optimal_lineup_assignment(bundle, roster_b, combined_proj) if roster_b else []
+                if not assign_a and not assign_b:
+                    st.info("No projection data available to build a lineup breakdown yet.")
+                else:
+                    assign_a = reorder_by_canonical_slots(assign_a, canonical_slots)
+                    assign_b = reorder_by_canonical_slots(assign_b, canonical_slots)
+                    max_len = max(len(assign_a), len(assign_b))
+                    rows_html = ""
+                    for i in range(max_len):
+                        a = assign_a[i] if i < len(assign_a) else {"slot": "", "name": "—", "position": "", "points": None}
+                        b = assign_b[i] if i < len(assign_b) else {"slot": "", "name": "—", "position": "", "points": None}
+                        slot_label = a["slot"] or b["slot"]
+                        a_pts = f'{a["points"]:.1f}' if a["points"] is not None else "—"
+                        b_pts = f'{b["points"]:.1f}' if b["points"] is not None else "—"
+                        rows_html += (
+                            f'<div class="lineup-compare-row">'
+                            f'<div class="lineup-compare-side"><span class="lineup-compare-name">{clean(a["name"])}</span>'
+                            f'<span class="lineup-compare-meta">{clean(a["position"])}</span>'
+                            f'<span class="lineup-compare-pts">{a_pts}</span></div>'
+                            f'<div class="lineup-compare-slot">{clean(slot_label)}</div>'
+                            f'<div class="lineup-compare-side right"><span class="lineup-compare-name">{clean(b["name"])}</span>'
+                            f'<span class="lineup-compare-meta">{clean(b["position"])}</span>'
+                            f'<span class="lineup-compare-pts">{b_pts}</span></div>'
+                            f'</div>'
+                        )
+                    render_html(rows_html)
 
     st.divider()
     st.markdown("### Playoff & Championship Simulation Engine")
@@ -4778,32 +4807,53 @@ def current_matchup_info(
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_sleeper_projections(season: int, week: int) -> dict[str, float]:
-    """Sleeper's own weekly point projections, if available via their public API —
-    the same numbers Sleeper's own app shows before kickoff. This isn't a
-    confirmed-stable endpoint (untested against live data), so it's parsed
-    defensively: any unexpected response shape just yields an empty dict,
-    which triggers a graceful fallback to our own season-average sketch.
+    """Sleeper's own weekly point projections — the same numbers Sleeper's own
+    app shows before kickoff. This lives on a different URL shape than the
+    rest of this app's Sleeper calls (no /v1 prefix, season_type as a query
+    param, e.g. api.sleeper.app/projections/nfl/<season>/<week>?season_type=
+    regular) and its exact response shape isn't officially documented — some
+    sources describe a flat list of {player_id, stats} objects, others a dict
+    keyed directly by player_id. Parsed defensively to handle either; any
+    truly unexpected shape just yields an empty dict, triggering a graceful
+    fallback to our own season-average sketch.
     """
+    url = f"https://api.sleeper.app/projections/nfl/{season}/{week}?season_type=regular"
     try:
-        data = get_json(f"{SLEEPER_BASE}/projections/nfl/regular/{season}/{week}")
+        data = get_json(url)
     except DataError:
         return {}
-    if not isinstance(data, list):
-        return {}
+
+    def extract_pts(stats_obj: Any) -> float | None:
+        if not isinstance(stats_obj, dict):
+            return None
+        for key in ("pts_ppr", "pts_half_ppr", "pts_std"):
+            v = stats_obj.get(key)
+            if v is not None:
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    continue
+        return None
+
     projections: dict[str, float] = {}
-    for entry in data:
-        if not isinstance(entry, dict):
-            continue
-        pid = entry.get("player_id")
-        stats = entry.get("stats") or {}
-        pts = stats.get("pts_ppr")
-        if pts is None:
-            pts = stats.get("pts_half_ppr") or stats.get("pts_std")
-        if pid is not None and pts is not None:
-            try:
-                projections[str(pid)] = float(pts)
-            except (TypeError, ValueError):
+    if isinstance(data, list):
+        for entry in data:
+            if not isinstance(entry, dict):
                 continue
+            pid = entry.get("player_id")
+            if pid is None:
+                pid = (entry.get("player") or {}).get("player_id")
+            pts = extract_pts(entry.get("stats")) or extract_pts(entry)
+            if pid is not None and pts is not None:
+                projections[str(pid)] = pts
+    elif isinstance(data, dict):
+        for pid, entry in data.items():
+            if not isinstance(entry, dict):
+                continue
+            pts = extract_pts(entry.get("stats")) or extract_pts(entry)
+            if pts is not None:
+                projections[str(pid)] = pts
+
     return projections
 
 
@@ -4890,6 +4940,77 @@ def compute_optimal_lineup_points(bundle: dict[str, Any], roster: dict[str, Any]
         total += best["points"]
         used.add(best["id"])
     return total
+
+
+def optimal_lineup_assignment(
+    bundle: dict[str, Any], roster: dict[str, Any], player_points: dict[str, float]
+) -> list[dict[str, Any]]:
+    """Same slot-eligibility logic as compute_optimal_lineup_points, but
+    returns the full per-slot assignment (slot, player, position, points)
+    instead of just the total — used for the matchup drill-down view.
+    """
+    slot_labels = [s for s in (bundle["league"].get("roster_positions") or []) if s not in ("BN", "IR", "TAXI")]
+    if not slot_labels:
+        return []
+    pool = []
+    for pid in (roster.get("players") or []):
+        pid = str(pid)
+        pts = player_points.get(pid)
+        if pts is None:
+            continue
+        meta = bundle["players"].get(pid, {}) or {}
+        name = meta.get("full_name") or " ".join(filter(None, [meta.get("first_name"), meta.get("last_name")])) or pid
+        pool.append(
+            {
+                "id": pid, "points": float(pts), "name": name,
+                "position": meta.get("position") or "",
+                "eligible": set(meta.get("fantasy_positions") or []),
+            }
+        )
+    if not pool:
+        return []
+
+    def slot_eligible(slot: str, elig: set[str]) -> bool:
+        if slot in elig:
+            return True
+        if slot == "FLEX":
+            return bool(elig & {"RB", "WR", "TE"})
+        if slot == "SUPER_FLEX":
+            return bool(elig & {"QB", "RB", "WR", "TE"})
+        if slot == "REC_FLEX":
+            return bool(elig & {"WR", "TE"})
+        return False
+
+    slot_order = sorted(slot_labels, key=lambda s: sum(1 for p in pool if slot_eligible(s, p["eligible"])))
+    used: set[str] = set()
+    assignment = []
+    for slot in slot_order:
+        candidates = [p for p in pool if p["id"] not in used and slot_eligible(slot, p["eligible"])]
+        if not candidates:
+            assignment.append({"slot": slot, "name": "Empty", "position": "", "points": None})
+            continue
+        best = max(candidates, key=lambda p: p["points"])
+        used.add(best["id"])
+        assignment.append(
+            {"slot": slot, "name": best["name"], "position": best["position"], "points": best["points"]}
+        )
+    return assignment
+
+
+def reorder_by_canonical_slots(assignment: list[dict[str, Any]], canonical_slots: list[str]) -> list[dict[str, Any]]:
+    """Optimal lineup assignments are built by filling the most scarce slot
+    first, which can put slots in a different order for two different teams
+    (their eligible pools differ). Re-sort both into the league's actual slot
+    order so a side-by-side comparison lines up QB-with-QB, RB-with-RB, etc.
+    """
+    pool = list(assignment)
+    ordered = []
+    for slot in canonical_slots:
+        idx = next((i for i, a in enumerate(pool) if a["slot"] == slot), None)
+        if idx is not None:
+            ordered.append(pool.pop(idx))
+    ordered.extend(pool)
+    return ordered
 
 
 def compute_start_sit_accuracy(
@@ -5224,9 +5345,9 @@ def build_full_week_board(
             roster = roster_by_id.get(int(rid)) if rid is not None else None
             team = roster_to_team.get(int(rid), f"Roster {rid}") if rid is not None else "Unknown"
             proj = optimal_projected_lineup(bundle, roster, combined_proj) if roster else None
-            proj_by_side.append((team, proj))
+            proj_by_side.append((team, proj, rid))
 
-        (team_a, proj_a), (team_b, proj_b) = proj_by_side
+        (team_a, proj_a, rid_a), (team_b, proj_b, rid_b) = proj_by_side
         pa = proj_a if proj_a is not None else 100.0
         pb = proj_b if proj_b is not None else 100.0
         win_a = matchup_win_probability(pa, pb, std_for(team_a), std_for(team_b))
@@ -5234,8 +5355,8 @@ def build_full_week_board(
         rows.append(
             {
                 "Matchup ID": mid,
-                "Team A": team_a, "Proj A": proj_a, "Win % A": round(win_a * 100, 1),
-                "Team B": team_b, "Proj B": proj_b, "Win % B": round((1 - win_a) * 100, 1),
+                "Team A": team_a, "Proj A": proj_a, "Win % A": round(win_a * 100, 1), "Roster ID A": rid_a,
+                "Team B": team_b, "Proj B": proj_b, "Win % B": round((1 - win_a) * 100, 1), "Roster ID B": rid_b,
             }
         )
     return pd.DataFrame(rows)
