@@ -2024,6 +2024,134 @@ def render_weekly_dashboard(bundle: dict[str, Any], teams: pd.DataFrame, players
             render_html(rows_html)
 
 
+def render_league_projections(bundle: dict[str, Any], teams: pd.DataFrame) -> None:
+    render_brand(
+        "League Projections",
+        "Week-by-week matchup projections and a configurable playoff/championship simulation engine",
+    )
+
+    league = bundle["league"]
+    league_id = str(league.get("league_id") or LEAGUE_ID)
+    users = {str(u.get("user_id")): team_name(u) for u in bundle["users"]}
+    roster_to_team = {
+        int(r["roster_id"]): users.get(str(r.get("owner_id")), f"Roster {r['roster_id']}")
+        for r in bundle["rosters"]
+    }
+
+    state = load_nfl_state()
+    season_type = state.get("season_type", "off")
+    current_week = int(state.get("week") or 1) if season_type in {"regular", "post"} else 1
+    completed_weeks = max(current_week - 1, 0) if season_type == "regular" else (17 if season_type == "post" else 0)
+    proj_season = int(state.get("season") or league.get("season") or 2026)
+    playoff_week_start = int((league.get("settings") or {}).get("playoff_week_start") or 15)
+
+    st.caption(
+        "Week-by-week scores use Sleeper's own projections when available, falling back to a "
+        "self-computed season-average sketch otherwise. The simulation below is our own Monte Carlo "
+        "model — real remaining schedule, each team's own scoring mean/variance, and a standard "
+        "static-seed playoff bracket — not a licensed odds product. Treat everything here as "
+        "directional, not a guarantee."
+    )
+
+    st.markdown("### Week-by-Week Projections")
+    max_week = max(playoff_week_start + 3, current_week + 1)
+    week_options = list(range(1, max_week))
+    week_choice = st.selectbox(
+        "Week", week_options, index=min(max(current_week - 1, 0), len(week_options) - 1)
+    )
+
+    week_table = build_week_matchup_table(bundle, week_choice, roster_to_team, completed_weeks, proj_season)
+    if week_table.empty:
+        st.info(f"No schedule data available for Week {week_choice} yet.")
+    else:
+        shown_pairs: set[tuple[str, str]] = set()
+        sort_col = week_table["Projected"].fillna(-1)
+        for _, row in week_table.loc[sort_col.sort_values(ascending=False).index].iterrows():
+            pair_key = tuple(sorted([row["Team"], row["Opponent"]]))
+            if pair_key in shown_pairs:
+                continue
+            shown_pairs.add(pair_key)
+
+            opp_rows = week_table[week_table["Team"] == row["Opponent"]]
+            opp_proj = opp_rows.iloc[0]["Projected"] if not opp_rows.empty else None
+            my_proj = row["Projected"]
+
+            my_label = f"{my_proj:.1f}" if my_proj is not None else "—"
+            opp_label = f"{opp_proj:.1f}" if opp_proj is not None else "—"
+            if my_proj is not None and opp_proj is not None:
+                winner = row["Team"] if my_proj >= opp_proj else row["Opponent"]
+                rationale = f"Projected winner: {clean(winner)}"
+            else:
+                rationale = "Not enough data yet to project a winner."
+
+            render_html(
+                f'<div class="trade-card"><div class="trade-card-top">'
+                f'<b>Week {week_choice}</b></div>'
+                f'<div class="matchup-row" style="padding:.4rem 0">'
+                f'<div class="matchup-team"><div class="matchup-label">{clean(row["Team"])}</div>'
+                f'<div class="matchup-score">{my_label}</div></div>'
+                f'<div class="matchup-vs">VS</div>'
+                f'<div class="matchup-team"><div class="matchup-label">{clean(row["Opponent"])}</div>'
+                f'<div class="matchup-score">{opp_label}</div></div>'
+                f'</div><div class="trade-rationale">{rationale}</div></div>'
+            )
+
+    st.divider()
+    st.markdown("### Playoff & Championship Simulation Engine")
+    st.caption("Tune the knobs below, then run it. Nothing here is saved.")
+
+    with st.expander("Simulation settings", expanded=True):
+        trials = st.slider(
+            "Simulation trials", min_value=100, max_value=2000, value=500, step=100,
+            help="More trials = more stable odds, slower to compute.",
+        )
+        variance_mult = st.slider(
+            "Score variance multiplier", min_value=0.5, max_value=2.0, value=1.0, step=0.1,
+            help="Scale how volatile weekly scores are in the simulation — raise it to stress-test "
+            "chaos/upsets, lower it to see something closer to a 'chalk' outcome.",
+        )
+        team_names = teams["Team"].tolist()
+        boost_teams = st.multiselect(
+            "Nudge specific teams' projected scoring (optional)", team_names,
+            help="Model an injury, a hot streak, a big trade — anything that would shift a team's "
+            "average output up or down for the rest of the season.",
+        )
+        mean_adjustments: dict[str, float] = {}
+        for t in boost_teams:
+            pct = st.slider(
+                f"{t} scoring adjustment (%)", min_value=-30, max_value=30, value=0, step=5,
+                key=f"proj_adj_{t}",
+            )
+            mean_adjustments[t] = pct
+
+    run_clicked = st.button("Run simulation", use_container_width=True)
+    if run_clicked or "league_proj_sim" not in st.session_state:
+        with st.spinner("Simulating the rest of the season..."):
+            weekly_scores = build_weekly_scores(league_id, roster_to_team, completed_weeks)
+            st.session_state["league_proj_sim"] = simulate_full_league(
+                bundle, weekly_scores, current_week,
+                trials=trials, variance_mult=variance_mult, mean_adjustments=mean_adjustments,
+            )
+
+    sim = st.session_state.get("league_proj_sim")
+    if sim is None or sim.empty:
+        st.info("Run the simulation to see projected standings and a champion.")
+        return
+
+    champ_row = sim.iloc[0]
+    render_html(
+        f'<div class="gm-card">🏆 <b>Projected League Champion:</b> '
+        f'<span style="font-size:1.2rem;font-weight:900">{clean(champ_row["Team"])}</span> '
+        f'&mdash; won the simulated championship in {champ_row["Champion Odds"]:.1f}% of {trials} trials.</div>'
+    )
+
+    st.markdown("#### Projected Final Standings")
+    st.dataframe(
+        sim.rename(columns={"Champion Odds": "Champion %", "Playoff Odds": "Playoff %"}),
+        hide_index=True, use_container_width=True,
+    )
+
+
 def render_team_review(
     bundle: dict[str, Any], teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame, league_name: str
 ) -> None:
@@ -4766,6 +4894,200 @@ def simulate_playoff_odds(bundle: dict[str, Any], teams_scores: pd.DataFrame, te
     return round(makes_playoffs / trials * 100, 1)
 
 
+def simulate_bracket_once(
+    seeds: list[str], team_mean: Any, team_std: Any
+) -> str:
+    """One trial of a standard fantasy playoff bracket, static seeding (no
+    reseeding between rounds). Handles the common 2/4/6/8-team formats
+    explicitly; anything unusual falls back to a single simulated high score."""
+    n = len(seeds)
+    if n <= 1:
+        return seeds[0] if seeds else ""
+
+    def draw(t: str) -> float:
+        return random.gauss(team_mean(t), team_std(t))
+
+    def head_to_head(a: str, b: str) -> str:
+        sa, sb = draw(a), draw(b)
+        return a if sa >= sb else b
+
+    if n == 2:
+        return head_to_head(seeds[0], seeds[1])
+    if n == 4:
+        w1 = head_to_head(seeds[0], seeds[3])
+        w2 = head_to_head(seeds[1], seeds[2])
+        return head_to_head(w1, w2)
+    if n == 6:
+        # Top 2 seeds get a bye into the semifinals.
+        w36 = head_to_head(seeds[2], seeds[5])
+        w45 = head_to_head(seeds[3], seeds[4])
+        sf1 = head_to_head(seeds[0], w45)
+        sf2 = head_to_head(seeds[1], w36)
+        return head_to_head(sf1, sf2)
+    if n == 8:
+        w18 = head_to_head(seeds[0], seeds[7])
+        w45 = head_to_head(seeds[3], seeds[4])
+        w27 = head_to_head(seeds[1], seeds[6])
+        w36 = head_to_head(seeds[2], seeds[5])
+        sf1 = head_to_head(w18, w45)
+        sf2 = head_to_head(w27, w36)
+        return head_to_head(sf1, sf2)
+    # Unusual bracket size — no defined structure, so just take the best
+    # single simulated score among the seeds as a rough stand-in.
+    return max(seeds, key=draw)
+
+
+def simulate_full_league(
+    bundle: dict[str, Any],
+    teams_scores: pd.DataFrame,
+    current_week: int,
+    trials: int = 500,
+    variance_mult: float = 1.0,
+    mean_adjustments: dict[str, float] | None = None,
+) -> pd.DataFrame:
+    """Full-league Monte Carlo season + playoff simulation: real remaining
+    schedule from Sleeper, each team's score drawn from its own season mean/
+    variance (optionally nudged), tracking average final wins, playoff odds,
+    and championship odds for every team at once. This is our own simulation
+    — a modeling exercise, not a licensed odds product.
+
+    The playoff bracket assumes standard static seeding (no reseeding between
+    rounds) for 2/4/6/8-team playoff fields — the most common fantasy
+    formats. If your league uses a different bracket structure, treat the
+    championship odds as directional rather than exact.
+    """
+    settings = bundle["league"].get("settings") or {}
+    playoff_week_start = int(settings.get("playoff_week_start") or 15)
+    playoff_teams_n = int(settings.get("playoff_teams") or 6)
+    league_id = str(bundle["league"].get("league_id") or LEAGUE_ID)
+    mean_adjustments = mean_adjustments or {}
+
+    users = {str(u.get("user_id")): team_name(u) for u in bundle["users"]}
+    roster_to_team = {
+        int(r["roster_id"]): users.get(str(r.get("owner_id")), f"Roster {r['roster_id']}")
+        for r in bundle["rosters"]
+    }
+    all_teams = list(roster_to_team.values())
+    if not all_teams:
+        return pd.DataFrame()
+
+    base_wins = {
+        roster_to_team.get(int(r["roster_id"])): int((r.get("settings") or {}).get("wins") or 0)
+        for r in bundle["rosters"]
+    }
+    base_pf = {
+        roster_to_team.get(int(r["roster_id"])): float((r.get("settings") or {}).get("fpts") or 0)
+        for r in bundle["rosters"]
+    }
+    stats = teams_scores.groupby("Team")["Points"].agg(["mean", "std"]) if not teams_scores.empty else pd.DataFrame()
+
+    def team_mean(t: str) -> float:
+        base = float(stats.loc[t, "mean"]) if t in stats.index else 100.0
+        return base * (1 + mean_adjustments.get(t, 0.0) / 100.0)
+
+    def team_std(t: str) -> float:
+        base = float(stats.loc[t, "std"]) if t in stats.index else 15.0
+        return max(base, 8.0) * variance_mult
+
+    remaining_schedule = []
+    for wk in range(max(current_week, 1), playoff_week_start):
+        matchups = load_matchups(league_id, wk)
+        if not matchups:
+            continue
+        pairs: dict[Any, list[str]] = {}
+        for m in matchups:
+            mid, rid = m.get("matchup_id"), m.get("roster_id")
+            if mid is None or rid is None:
+                continue
+            pairs.setdefault(mid, []).append(roster_to_team.get(int(rid), f"Roster {rid}"))
+        remaining_schedule.append([tuple(v) for v in pairs.values() if len(v) == 2])
+
+    playoff_count = {t: 0 for t in all_teams}
+    champ_count = {t: 0 for t in all_teams}
+    win_totals = {t: 0 for t in all_teams}
+    seed_totals = {t: 0 for t in all_teams}
+
+    for _ in range(trials):
+        wins = dict(base_wins)
+        pf = dict(base_pf)
+        for week_pairs in remaining_schedule:
+            for a, b in week_pairs:
+                sa, sb = random.gauss(team_mean(a), team_std(a)), random.gauss(team_mean(b), team_std(b))
+                pf[a] = pf.get(a, 0) + sa
+                pf[b] = pf.get(b, 0) + sb
+                if sa >= sb:
+                    wins[a] = wins.get(a, 0) + 1
+                else:
+                    wins[b] = wins.get(b, 0) + 1
+
+        ranked = sorted(all_teams, key=lambda t: (-wins.get(t, 0), -pf.get(t, 0)))
+        for i, t in enumerate(ranked):
+            win_totals[t] += wins.get(t, 0)
+            seed_totals[t] += i + 1
+
+        seeds = ranked[: min(playoff_teams_n, len(ranked))]
+        for t in seeds:
+            playoff_count[t] += 1
+        champion = simulate_bracket_once(seeds, team_mean, team_std)
+        if champion:
+            champ_count[champion] += 1
+
+    rows = [
+        {
+            "Team": t,
+            "Avg Final Wins": round(win_totals[t] / trials, 1),
+            "Avg Seed": round(seed_totals[t] / trials, 1),
+            "Playoff Odds": round(playoff_count[t] / trials * 100, 1),
+            "Champion Odds": round(champ_count[t] / trials * 100, 1),
+        }
+        for t in all_teams
+    ]
+    return pd.DataFrame(rows).sort_values("Champion Odds", ascending=False).reset_index(drop=True)
+
+
+def build_week_matchup_table(
+    bundle: dict[str, Any], week: int, roster_to_team: dict[int, str],
+    completed_weeks: int, season: int,
+) -> pd.DataFrame:
+    """Real schedule pairings for a given week, with each team's projected
+    score (Sleeper's own projections when available, our season-average
+    sketch otherwise)."""
+    league_id = str(bundle["league"].get("league_id") or LEAGUE_ID)
+    matchups = load_matchups(league_id, week)
+    if not matchups:
+        return pd.DataFrame()
+
+    by_matchup: dict[Any, list[dict[str, Any]]] = {}
+    for m in matchups:
+        mid = m.get("matchup_id")
+        if mid is None:
+            continue
+        by_matchup.setdefault(mid, []).append(m)
+
+    roster_by_id = {int(r["roster_id"]): r for r in bundle["rosters"]}
+    rows = []
+    for mid, entries in by_matchup.items():
+        if len(entries) != 2:
+            continue
+        for i in (0, 1):
+            me, opp = entries[i], entries[1 - i]
+            rid = me.get("roster_id")
+            roster = roster_by_id.get(int(rid)) if rid is not None else None
+            if not roster:
+                continue
+            proj, source = project_lineup_points(league_id, roster, completed_weeks, season, week)
+            rows.append(
+                {
+                    "Team": roster_to_team.get(int(rid), f"Roster {rid}"),
+                    "Opponent": roster_to_team.get(int(opp.get("roster_id")), "Unknown"),
+                    "Projected": proj,
+                    "Source": source,
+                    "Matchup ID": mid,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def build_waiver_targets(bundle: dict[str, Any], players: pd.DataFrame, limit: int = 8) -> pd.DataFrame:
     """League-wide trending Sleeper adds, filtered to players not already rostered here."""
     trending = load_trending_adds()
@@ -5102,7 +5424,7 @@ def main() -> None:
     st.sidebar.markdown("## 🏈 Front Office")
     page = st.sidebar.radio(
         "Navigation",
-        ["My Team", "Team Blueprint", "League", "League Analyzer", "Rankings", "Team Needs", "Trade Centre", "Roster Lab", "Draft Capital", "Draft History", "Trade History", "Mock Draft"],
+        ["My Team", "Team Blueprint", "League", "League Projections", "League Analyzer", "Rankings", "Team Needs", "Trade Centre", "Roster Lab", "Draft Capital", "Draft History", "Trade History", "Mock Draft"],
         label_visibility="collapsed",
     )
     st.sidebar.markdown("---")
@@ -5130,6 +5452,8 @@ def main() -> None:
         render_team_blueprint(bundle, teams, players, picks)
     elif page == "League":
         render_power_rankings(teams, players, picks)
+    elif page == "League Projections":
+        render_league_projections(bundle, teams)
     elif page == "League Analyzer":
         render_league_analyzer(bundle, teams, players)
     elif page == "Rankings":
