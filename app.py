@@ -798,6 +798,25 @@ st.markdown(
     }
     .matchup-score { font-size:1.6rem; font-weight:900; }
     .matchup-proj { font-size:.68rem; color:var(--muted); font-weight:700; margin-top:.15rem; }
+    .matchup-prob-row {
+      display:flex;
+      align-items:center;
+      gap:.5rem;
+      margin-top:.6rem;
+      padding-top:.5rem;
+      border-top:1px solid var(--border);
+    }
+    .matchup-prob-pct { font-size:.72rem; font-weight:800; width:2.4rem; text-align:center; }
+    .matchup-prob-track {
+      flex:1;
+      height:6px;
+      border-radius:999px;
+      overflow:hidden;
+      display:flex;
+      background:var(--panel2);
+    }
+    .matchup-prob-fill-a { background:#3ddc84; height:100%; }
+    .matchup-prob-fill-b { background:#ff6b6b; height:100%; }
     .matchup-label { font-size:.68rem; color:var(--muted); font-weight:700; }
     .matchup-vs {
       width:32px;
@@ -2024,10 +2043,10 @@ def render_weekly_dashboard(bundle: dict[str, Any], teams: pd.DataFrame, players
             render_html(rows_html)
 
 
-def render_league_projections(bundle: dict[str, Any], teams: pd.DataFrame) -> None:
+def render_league_projections(bundle: dict[str, Any], teams: pd.DataFrame, players: pd.DataFrame) -> None:
     render_brand(
         "League Projections",
-        "Week-by-week matchup projections and a configurable playoff/championship simulation engine",
+        "Every matchup, every team, projected — plus a configurable playoff/championship simulation engine",
     )
 
     league = bundle["league"]
@@ -2046,54 +2065,81 @@ def render_league_projections(bundle: dict[str, Any], teams: pd.DataFrame) -> No
     playoff_week_start = int((league.get("settings") or {}).get("playoff_week_start") or 15)
 
     st.caption(
-        "Week-by-week scores use Sleeper's own projections when available, falling back to a "
-        "self-computed season-average sketch otherwise. The simulation below is our own Monte Carlo "
-        "model — real remaining schedule, each team's own scoring mean/variance, and a standard "
+        "Each team's projected score here is its BEST POSSIBLE lineup (optimal-lineup projection, "
+        "not just whoever's currently starting) — real slot eligibility, Sleeper's own weekly "
+        "projections where available, our own season-average sketch to fill any gaps. Win % assumes "
+        "roughly normal score distributions around each projection. The simulation below is our own "
+        "Monte Carlo model — real remaining schedule, each team's scoring mean/variance, a standard "
         "static-seed playoff bracket — not a licensed odds product. Treat everything here as "
         "directional, not a guarantee."
     )
 
-    st.markdown("### Week-by-Week Projections")
+    st.markdown("### Week-by-Week League Board")
     max_week = max(playoff_week_start + 3, current_week + 1)
     week_options = list(range(1, max_week))
     week_choice = st.selectbox(
         "Week", week_options, index=min(max(current_week - 1, 0), len(week_options) - 1)
     )
 
-    week_table = build_week_matchup_table(bundle, week_choice, roster_to_team, completed_weeks, proj_season)
-    if week_table.empty:
+    board = build_full_week_board(bundle, week_choice, roster_to_team, proj_season, completed_weeks)
+    if board.empty:
         st.info(f"No schedule data available for Week {week_choice} yet.")
     else:
-        shown_pairs: set[tuple[str, str]] = set()
-        sort_col = week_table["Projected"].fillna(-1)
-        for _, row in week_table.loc[sort_col.sort_values(ascending=False).index].iterrows():
-            pair_key = tuple(sorted([row["Team"], row["Opponent"]]))
-            if pair_key in shown_pairs:
-                continue
-            shown_pairs.add(pair_key)
-
-            opp_rows = week_table[week_table["Team"] == row["Opponent"]]
-            opp_proj = opp_rows.iloc[0]["Projected"] if not opp_rows.empty else None
-            my_proj = row["Projected"]
-
-            my_label = f"{my_proj:.1f}" if my_proj is not None else "—"
-            opp_label = f"{opp_proj:.1f}" if opp_proj is not None else "—"
-            if my_proj is not None and opp_proj is not None:
-                winner = row["Team"] if my_proj >= opp_proj else row["Opponent"]
-                rationale = f"Projected winner: {clean(winner)}"
-            else:
-                rationale = "Not enough data yet to project a winner."
-
+        for _, row in board.sort_values("Proj A", ascending=False, na_position="last").iterrows():
+            proj_a, proj_b = row["Proj A"], row["Proj B"]
+            label_a = f"{proj_a:.1f}" if proj_a is not None else "—"
+            label_b = f"{proj_b:.1f}" if proj_b is not None else "—"
+            win_a, win_b = row["Win % A"], row["Win % B"]
             render_html(
-                f'<div class="trade-card"><div class="trade-card-top">'
-                f'<b>Week {week_choice}</b></div>'
-                f'<div class="matchup-row" style="padding:.4rem 0">'
-                f'<div class="matchup-team"><div class="matchup-label">{clean(row["Team"])}</div>'
-                f'<div class="matchup-score">{my_label}</div></div>'
+                f'<div class="matchup-card"><div class="matchup-row">'
+                f'<div class="matchup-team"><div class="matchup-label">{clean(row["Team A"])}</div>'
+                f'<div class="matchup-score">{label_a}</div></div>'
                 f'<div class="matchup-vs">VS</div>'
-                f'<div class="matchup-team"><div class="matchup-label">{clean(row["Opponent"])}</div>'
-                f'<div class="matchup-score">{opp_label}</div></div>'
-                f'</div><div class="trade-rationale">{rationale}</div></div>'
+                f'<div class="matchup-team"><div class="matchup-label">{clean(row["Team B"])}</div>'
+                f'<div class="matchup-score">{label_b}</div></div>'
+                f'</div>'
+                f'<div class="matchup-prob-row">'
+                f'<span class="matchup-prob-pct">{win_a:.0f}%</span>'
+                f'<div class="matchup-prob-track">'
+                f'<div class="matchup-prob-fill-a" style="width:{win_a:.0f}%"></div>'
+                f'<div class="matchup-prob-fill-b" style="width:{win_b:.0f}%"></div>'
+                f'</div>'
+                f'<span class="matchup-prob-pct">{win_b:.0f}%</span>'
+                f'</div></div>'
+            )
+
+    st.divider()
+    st.markdown("### Player Weekly Projections")
+    st.caption(
+        "A full-season, game-log-style view for one player — Sleeper's own projection per week "
+        "plus the real actual score once that week's been played. Also a direct way to confirm "
+        "whether Sleeper's projections endpoint is returning real numbers for this league: if every "
+        "row comes back blank, it likely isn't available the way we're calling it."
+    )
+    rostered_players = players[players["Value"] > 0].sort_values("Player")
+    player_options = rostered_players["Player"].tolist()
+    if not player_options:
+        st.info("No rostered players found.")
+    else:
+        player_choice = st.selectbox("Player", player_options, key="league_proj_player")
+        prow = rostered_players[rostered_players["Player"] == player_choice].iloc[0]
+        sleeper_id = str(prow["Sleeper ID"])
+        season_weeks = list(range(1, max_week))
+        with st.spinner(f"Loading {player_choice}'s weekly projections..."):
+            proj_table = build_player_season_projections(league_id, sleeper_id, proj_season, season_weeks)
+        display_table = proj_table.copy()
+        display_table["Projected"] = display_table["Projected"].map(
+            lambda v: f"{v:.2f}" if pd.notna(v) else "—"
+        )
+        display_table["Actual"] = display_table["Actual"].map(
+            lambda v: f"{v:.2f}" if pd.notna(v) else "—"
+        )
+        st.dataframe(display_table, hide_index=True, use_container_width=True)
+        if proj_table["Projected"].notna().sum() == 0:
+            st.warning(
+                "Every projection came back empty for this player across the whole season — "
+                "Sleeper's projections endpoint likely isn't returning data the way this app expects "
+                "it to. Real actual scores (once games are played) aren't affected by this."
             )
 
     st.divider()
@@ -2135,17 +2181,27 @@ def render_league_projections(bundle: dict[str, Any], teams: pd.DataFrame) -> No
 
     sim = st.session_state.get("league_proj_sim")
     if sim is None or sim.empty:
-        st.info("Run the simulation to see projected standings and a champion.")
+        st.info("Run the simulation to see projected standings, a champion, and next year's likely top pick.")
         return
 
     champ_row = sim.iloc[0]
-    render_html(
-        f'<div class="gm-card">🏆 <b>Projected League Champion:</b> '
-        f'<span style="font-size:1.2rem;font-weight:900">{clean(champ_row["Team"])}</span> '
-        f'&mdash; won the simulated championship in {champ_row["Champion Odds"]:.1f}% of {trials} trials.</div>'
-    )
+    worst_row = sim.sort_values("Avg Final Wins", ascending=True).iloc[0]
+    ccol, pcol = st.columns(2)
+    with ccol:
+        render_html(
+            f'<div class="gm-card">🏆 <b>Projected League Champion:</b><br>'
+            f'<span style="font-size:1.2rem;font-weight:900">{clean(champ_row["Team"])}</span><br>'
+            f'won the simulated championship in {champ_row["Champion Odds"]:.1f}% of {trials} trials.</div>'
+        )
+    with pcol:
+        render_html(
+            f'<div class="gm-card">🔻 <b>Projected #1 Pick Next Season:</b><br>'
+            f'<span style="font-size:1.2rem;font-weight:900">{clean(worst_row["Team"])}</span><br>'
+            f'averaged the fewest wins ({worst_row["Avg Final Wins"]:.1f}) across all simulated trials.</div>'
+        )
 
     st.markdown("#### Projected Final Standings")
+    st.caption("Sorted by championship odds — worst-to-best record is what drives next year's draft slot.")
     st.dataframe(
         sim.rename(columns={"Champion Odds": "Champion %", "Playoff Odds": "Playoff %"}),
         hide_index=True, use_container_width=True,
@@ -5067,18 +5123,90 @@ def simulate_full_league(
     return pd.DataFrame(rows).sort_values("Champion Odds", ascending=False).reset_index(drop=True)
 
 
-def build_week_matchup_table(
-    bundle: dict[str, Any], week: int, roster_to_team: dict[int, str],
-    completed_weeks: int, season: int,
+def build_player_avg_lookup(league_id: str, through_week: int) -> dict[str, float]:
+    """League-wide season-average points per player, built from every team's
+    completed-week matchup data — used to fill in projections for players
+    Sleeper's own projections endpoint doesn't cover."""
+    per_player: dict[str, list[float]] = {}
+    for wk in range(1, through_week + 1):
+        for m in load_matchups(league_id, wk):
+            for pid, pts in (m.get("players_points") or {}).items():
+                per_player.setdefault(pid, []).append(float(pts))
+    return {pid: sum(v) / len(v) for pid, v in per_player.items() if v}
+
+
+def optimal_projected_lineup(
+    bundle: dict[str, Any], roster: dict[str, Any], player_projections: dict[str, float]
+) -> float | None:
+    """The BEST possible lineup a team could set from its full roster, given a
+    projection for each player — not whatever they've actually got starting
+    right now. Reuses the same slot-eligibility logic as Start/Sit Accuracy,
+    just fed projected points instead of actual results.
+    """
+    return compute_optimal_lineup_points(bundle, roster, player_projections)
+
+
+def matchup_win_probability(mean_a: float, mean_b: float, std_a: float = 35.0, std_b: float = 35.0) -> float:
+    """P(team A outscores team B), assuming each team's score is roughly
+    normally distributed around its projection. A fixed default std is used
+    when there's no real season data yet to estimate one (e.g. Week 1)."""
+    combined_std = math.sqrt(std_a**2 + std_b**2)
+    if combined_std <= 0:
+        return 1.0 if mean_a > mean_b else (0.0 if mean_a < mean_b else 0.5)
+    z = (mean_a - mean_b) / combined_std
+    return 0.5 * (1 + math.erf(z / math.sqrt(2)))
+
+
+def build_player_season_projections(
+    league_id: str, sleeper_id: str, season: int, weeks: list[int]
 ) -> pd.DataFrame:
-    """Real schedule pairings for a given week, with each team's projected
-    score (Sleeper's own projections when available, our season-average
-    sketch otherwise)."""
+    """One row per week for a single player: Sleeper's own projection (if
+    available) and the real actual score once that week has been played.
+    Useful both as a game-log-style view and as a direct way to confirm
+    whether Sleeper's projections endpoint is actually returning real data
+    for this league — if every 'Projected' cell comes back empty, the
+    endpoint likely isn't available the way we're calling it.
+    """
+    rows = []
+    for wk in weeks:
+        proj_map = load_sleeper_projections(season, wk)
+        proj = proj_map.get(sleeper_id)
+        actual = None
+        for m in load_matchups(league_id, wk):
+            pts = (m.get("players_points") or {}).get(sleeper_id)
+            if pts is not None:
+                actual = float(pts)
+                break
+        rows.append({"Week": wk, "Projected": proj, "Actual": actual})
+    return pd.DataFrame(rows)
+
+
+def build_full_week_board(
+    bundle: dict[str, Any], week: int, roster_to_team: dict[int, str],
+    season: int, completed_weeks: int,
+) -> pd.DataFrame:
+    """Every real matchup pairing for a given week, with each team's BEST
+    POSSIBLE lineup total (optimal-lineup projection, not their currently-set
+    real starters), plus a win probability for each side.
+    """
     league_id = str(bundle["league"].get("league_id") or LEAGUE_ID)
     matchups = load_matchups(league_id, week)
     if not matchups:
         return pd.DataFrame()
 
+    sleeper_proj = load_sleeper_projections(season, week)
+    season_avg = build_player_avg_lookup(league_id, completed_weeks) if completed_weeks > 0 else {}
+    combined_proj = {**season_avg, **sleeper_proj}  # Sleeper's real numbers win where both exist
+
+    stats = build_weekly_scores(league_id, roster_to_team, completed_weeks)
+    team_stats = stats.groupby("Team")["Points"].agg(["mean", "std"]) if not stats.empty else pd.DataFrame()
+
+    def std_for(team: str) -> float:
+        if team in team_stats.index and pd.notna(team_stats.loc[team, "std"]):
+            return max(float(team_stats.loc[team, "std"]), 8.0)
+        return 35.0  # realistic full-lineup weekly std dev when there's no real variance data yet
+
+    roster_by_id = {int(r["roster_id"]): r for r in bundle["rosters"]}
     by_matchup: dict[Any, list[dict[str, Any]]] = {}
     for m in matchups:
         mid = m.get("matchup_id")
@@ -5086,27 +5214,33 @@ def build_week_matchup_table(
             continue
         by_matchup.setdefault(mid, []).append(m)
 
-    roster_by_id = {int(r["roster_id"]): r for r in bundle["rosters"]}
     rows = []
     for mid, entries in by_matchup.items():
         if len(entries) != 2:
             continue
-        for i in (0, 1):
-            me, opp = entries[i], entries[1 - i]
-            rid = me.get("roster_id")
+        proj_by_side = []
+        for m in entries:
+            rid = m.get("roster_id")
             roster = roster_by_id.get(int(rid)) if rid is not None else None
-            if not roster:
-                continue
-            proj, source = project_lineup_points(league_id, roster, completed_weeks, season, week)
-            rows.append(
-                {
-                    "Team": roster_to_team.get(int(rid), f"Roster {rid}"),
-                    "Opponent": roster_to_team.get(int(opp.get("roster_id")), "Unknown"),
-                    "Projected": proj,
-                    "Source": source,
-                    "Matchup ID": mid,
-                }
-            )
+            team = roster_to_team.get(int(rid), f"Roster {rid}") if rid is not None else "Unknown"
+            proj = optimal_projected_lineup(bundle, roster, combined_proj) if roster else None
+            proj_by_side.append((team, proj))
+
+        (team_a, proj_a), (team_b, proj_b) = proj_by_side
+        pa = proj_a if proj_a is not None else 100.0
+        pb = proj_b if proj_b is not None else 100.0
+        win_a = matchup_win_probability(pa, pb, std_for(team_a), std_for(team_b))
+
+        rows.append(
+            {
+                "Matchup ID": mid,
+                "Team A": team_a, "Proj A": proj_a, "Win % A": round(win_a * 100, 1),
+                "Team B": team_b, "Proj B": proj_b, "Win % B": round((1 - win_a) * 100, 1),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
     return pd.DataFrame(rows)
 
 
@@ -5475,7 +5609,7 @@ def main() -> None:
     elif page == "League":
         render_power_rankings(teams, players, picks)
     elif page == "League Projections":
-        render_league_projections(bundle, teams)
+        render_league_projections(bundle, teams, players)
     elif page == "League Analyzer":
         render_league_analyzer(bundle, teams, players)
     elif page == "Rankings":
