@@ -5102,6 +5102,7 @@ def simulate_playoff_odds(bundle: dict[str, Any], teams_scores: pd.DataFrame, te
     playoff_week_start = int(settings.get("playoff_week_start") or 15)
     playoff_teams_n = int(settings.get("playoff_teams") or 6)
     league_id = str(bundle["league"].get("league_id") or LEAGUE_ID)
+    proj_season = int(bundle["league"].get("season") or 2026)
 
     users = {str(u.get("user_id")): team_name(u) for u in bundle["users"]}
     roster_to_team = {int(r["roster_id"]): users.get(str(r.get("owner_id")), f"Roster {r['roster_id']}") for r in bundle["rosters"]}
@@ -5115,8 +5116,11 @@ def simulate_playoff_odds(bundle: dict[str, Any], teams_scores: pd.DataFrame, te
     }
     stats = teams_scores.groupby("Team")["Points"].agg(["mean", "std"]) if not teams_scores.empty else pd.DataFrame()
 
-    remaining_schedule = []
-    for wk in range(max(current_week, 1), playoff_week_start):
+    remaining_weeks = list(range(max(current_week, 1), playoff_week_start))
+    weekly_proj = build_weekly_team_projections(bundle, remaining_weeks, proj_season, roster_to_team)
+
+    remaining_schedule: list[tuple[int, list[tuple[str, str]]]] = []
+    for wk in remaining_weeks:
         matchups = load_matchups(league_id, wk)
         if not matchups:
             continue
@@ -5126,46 +5130,30 @@ def simulate_playoff_odds(bundle: dict[str, Any], teams_scores: pd.DataFrame, te
             if mid is None or rid is None:
                 continue
             pairs.setdefault(mid, []).append(roster_to_team.get(int(rid), f"Roster {rid}"))
-        remaining_schedule.append([tuple(v) for v in pairs.values() if len(v) == 2])
+        week_pairs = [tuple(v) for v in pairs.values() if len(v) == 2]
+        remaining_schedule.append((wk, week_pairs))
 
     if not remaining_schedule:
         ranked = sorted(all_teams, key=lambda t: -base_wins.get(t, 0))
         return 100.0 if team in ranked[:playoff_teams_n] else 0.0
 
-    # No real weekly scoring history yet? Fall back to real per-player
-    # projections (same source as the Week-by-Week board) instead of an
-    # identical flat number for every team — otherwise every team looks the
-    # same and the odds are just random trial noise, not a real estimate.
-    proj_fallback_mean: dict[str, float] = {}
-    if stats.empty:
-        proj_season = int(bundle["league"].get("season") or 2026)
-        sleeper_proj = load_sleeper_projections(
-            proj_season, current_week, bundle["league"].get("scoring_settings")
-        )
-        if sleeper_proj:
-            for r in bundle["rosters"]:
-                t_name = roster_to_team.get(int(r["roster_id"]))
-                if not t_name:
-                    continue
-                proj = optimal_projected_lineup(bundle, r, sleeper_proj)
-                if proj is not None:
-                    proj_fallback_mean[t_name] = proj
-
-    def team_score(t: str) -> float:
-        if t in stats.index and pd.notna(stats.loc[t, "mean"]):
+    def team_score_for_week(t: str, wk: int) -> float:
+        wk_proj = weekly_proj.get(wk, {}).get(t)
+        if wk_proj is not None:
+            mean = wk_proj
+        elif t in stats.index and pd.notna(stats.loc[t, "mean"]):
             mean = float(stats.loc[t, "mean"])
-            std = max(float(stats.loc[t, "std"]) if pd.notna(stats.loc[t, "std"]) else 30.0, 8.0)
         else:
-            mean = proj_fallback_mean.get(t, 100.0)
-            std = 30.0
+            mean = 100.0
+        std = max(float(stats.loc[t, "std"]) if t in stats.index and pd.notna(stats.loc[t, "std"]) else 30.0, 8.0)
         return random.gauss(mean, std)
 
     makes_playoffs = 0
     for _ in range(trials):
         wins = dict(base_wins)
-        for week_pairs in remaining_schedule:
+        for wk, week_pairs in remaining_schedule:
             for a, b in week_pairs:
-                if team_score(a) >= team_score(b):
+                if team_score_for_week(a, wk) >= team_score_for_week(b, wk):
                     wins[a] = wins.get(a, 0) + 1
                 else:
                     wins[b] = wins.get(b, 0) + 1
@@ -5218,6 +5206,31 @@ def simulate_bracket_once(
     return max(seeds, key=draw)
 
 
+def build_weekly_team_projections(
+    bundle: dict[str, Any], weeks: list[int], season: int, roster_to_team: dict[int, str]
+) -> dict[int, dict[str, float]]:
+    """Real per-week optimal-lineup projected totals for every team, across a
+    range of weeks — using Sleeper's actual weekly projections, which vary
+    week to week (byes, injury designations, matchup-specific news), rather
+    than a single static number reused for the whole rest of the season.
+    """
+    scoring_settings = bundle["league"].get("scoring_settings")
+    result: dict[int, dict[str, float]] = {}
+    for wk in weeks:
+        sleeper_proj = load_sleeper_projections(season, wk, scoring_settings)
+        week_totals: dict[str, float] = {}
+        if sleeper_proj:
+            for r in bundle["rosters"]:
+                team = roster_to_team.get(int(r["roster_id"]))
+                if not team:
+                    continue
+                proj = optimal_projected_lineup(bundle, r, sleeper_proj)
+                if proj is not None:
+                    week_totals[team] = proj
+        result[wk] = week_totals
+    return result
+
+
 def simulate_full_league(
     bundle: dict[str, Any],
     teams_scores: pd.DataFrame,
@@ -5241,6 +5254,7 @@ def simulate_full_league(
     playoff_week_start = int(settings.get("playoff_week_start") or 15)
     playoff_teams_n = int(settings.get("playoff_teams") or 6)
     league_id = str(bundle["league"].get("league_id") or LEAGUE_ID)
+    proj_season = int(bundle["league"].get("season") or 2026)
     mean_adjustments = mean_adjustments or {}
 
     users = {str(u.get("user_id")): team_name(u) for u in bundle["users"]}
@@ -5262,36 +5276,26 @@ def simulate_full_league(
     }
     stats = teams_scores.groupby("Team")["Points"].agg(["mean", "std"]) if not teams_scores.empty else pd.DataFrame()
 
-    # No real weekly scoring history yet (e.g. preseason, 0 completed weeks)?
-    # Falling back to an identical flat number for every team would make the
-    # whole simulation statistically meaningless — every team indistinguishable,
-    # "champion" and "worst record" just random trial noise. Instead, fall back
-    # to each team's real optimal-lineup PROJECTED total (the same Sleeper
-    # per-player projections powering the Week-by-Week board), which actually
-    # differentiates rosters even before any games have been played.
-    proj_fallback_mean: dict[str, float] = {}
-    if stats.empty:
-        proj_season = int(bundle["league"].get("season") or 2026)
-        sleeper_proj = load_sleeper_projections(
-            proj_season, current_week, bundle["league"].get("scoring_settings")
-        )
-        if sleeper_proj:
-            for r in bundle["rosters"]:
-                team = roster_to_team.get(int(r["roster_id"]))
-                if not team:
-                    continue
-                proj = optimal_projected_lineup(bundle, r, sleeper_proj)
-                if proj is not None:
-                    proj_fallback_mean[team] = proj
+    # Real schedule + a REAL projection for every remaining week — each
+    # week's simulated matchup draws from that specific week's actual
+    # projected total per team (byes, injury designations, and week-specific
+    # news all naturally reflected), not one static number reused all season.
+    remaining_weeks = list(range(max(current_week, 1), playoff_week_start))
+    weekly_proj = build_weekly_team_projections(bundle, remaining_weeks, proj_season, roster_to_team)
 
-    def team_mean(t: str) -> float:
-        if t in stats.index and pd.notna(stats.loc[t, "mean"]):
-            base = float(stats.loc[t, "mean"])
-        elif t in proj_fallback_mean:
-            base = proj_fallback_mean[t]
-        else:
-            base = 100.0
-        return base * (1 + mean_adjustments.get(t, 0.0) / 100.0)
+    remaining_schedule: list[tuple[int, list[tuple[str, str]]]] = []
+    for wk in remaining_weeks:
+        matchups = load_matchups(league_id, wk)
+        if not matchups:
+            continue
+        pairs: dict[Any, list[str]] = {}
+        for m in matchups:
+            mid, rid = m.get("matchup_id"), m.get("roster_id")
+            if mid is None or rid is None:
+                continue
+            pairs.setdefault(mid, []).append(roster_to_team.get(int(rid), f"Roster {rid}"))
+        week_pairs = [tuple(v) for v in pairs.values() if len(v) == 2]
+        remaining_schedule.append((wk, week_pairs))
 
     def team_std(t: str) -> float:
         if t in stats.index and pd.notna(stats.loc[t, "std"]):
@@ -5302,18 +5306,29 @@ def simulate_full_league(
             base = 30.0
         return max(base, 8.0) * variance_mult
 
-    remaining_schedule = []
-    for wk in range(max(current_week, 1), playoff_week_start):
-        matchups = load_matchups(league_id, wk)
-        if not matchups:
-            continue
-        pairs: dict[Any, list[str]] = {}
-        for m in matchups:
-            mid, rid = m.get("matchup_id"), m.get("roster_id")
-            if mid is None or rid is None:
-                continue
-            pairs.setdefault(mid, []).append(roster_to_team.get(int(rid), f"Roster {rid}"))
-        remaining_schedule.append([tuple(v) for v in pairs.values() if len(v) == 2])
+    def team_mean_for_week(t: str, wk: int) -> float:
+        wk_proj = weekly_proj.get(wk, {}).get(t)
+        if wk_proj is not None:
+            base = wk_proj
+        elif t in stats.index and pd.notna(stats.loc[t, "mean"]):
+            base = float(stats.loc[t, "mean"])
+        else:
+            base = 100.0
+        return base * (1 + mean_adjustments.get(t, 0.0) / 100.0)
+
+    def team_overall_mean(t: str) -> float:
+        # Used only for the playoff bracket, which sits further out than
+        # Sleeper's real per-week projection horizon usually reaches —
+        # averages whatever real per-week projections we do have for this
+        # team across the regular season, falling back the same way as above.
+        vals = [weekly_proj[wk][t] for wk in remaining_weeks if t in weekly_proj.get(wk, {})]
+        if vals:
+            base = sum(vals) / len(vals)
+        elif t in stats.index and pd.notna(stats.loc[t, "mean"]):
+            base = float(stats.loc[t, "mean"])
+        else:
+            base = 100.0
+        return base * (1 + mean_adjustments.get(t, 0.0) / 100.0)
 
     playoff_count = {t: 0 for t in all_teams}
     champ_count = {t: 0 for t in all_teams}
@@ -5323,9 +5338,10 @@ def simulate_full_league(
     for _ in range(trials):
         wins = dict(base_wins)
         pf = dict(base_pf)
-        for week_pairs in remaining_schedule:
+        for wk, week_pairs in remaining_schedule:
             for a, b in week_pairs:
-                sa, sb = random.gauss(team_mean(a), team_std(a)), random.gauss(team_mean(b), team_std(b))
+                sa = random.gauss(team_mean_for_week(a, wk), team_std(a))
+                sb = random.gauss(team_mean_for_week(b, wk), team_std(b))
                 pf[a] = pf.get(a, 0) + sa
                 pf[b] = pf.get(b, 0) + sb
                 if sa >= sb:
@@ -5341,7 +5357,7 @@ def simulate_full_league(
         seeds = ranked[: min(playoff_teams_n, len(ranked))]
         for t in seeds:
             playoff_count[t] += 1
-        champion = simulate_bracket_once(seeds, team_mean, team_std)
+        champion = simulate_bracket_once(seeds, team_overall_mean, team_std)
         if champion:
             champ_count[champion] += 1
 
