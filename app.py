@@ -2490,13 +2490,13 @@ def render_team_blueprint(
     col7, col8 = st.columns(2)
     with col7:
         st.markdown("**Look To Trade**")
-        st.caption("Your surplus at strong positions, cornerstones excluded.")
+        st.caption("Surplus at strong positions plus tradeable picks (1sts protected).")
         if not strategy["look_to_trade"]:
             st.info("No clear surplus assets right now.")
         else:
             cards = "".join(
                 render_asset_player_card(
-                    a["label"], a["position"], a["value"], a.get("image"),
+                    a["label"], a.get("position", "PICK"), a["value"], a.get("image"),
                     "SURPLUS", "surplus", position_rank=a.get("position_rank"),
                 )
                 for a in strategy["look_to_trade"]
@@ -2945,14 +2945,15 @@ def mutual_fit(
     regardless of position. 'their_offers' is the same idea from the partner's
     side. This is a needs-fit lens (who has what the other side is missing),
     not a value-balanced trade proposal like the Trade Centre scenarios.
-    Untouchable cornerstone players are excluded from both sides — a mutual
-    fit isn't realistic if it hinges on someone giving up a player they'd
-    never move.
+    Untouchable cornerstone players AND protected 1st-round picks are excluded
+    from both sides — a mutual fit isn't realistic if it hinges on someone
+    giving up a piece they'd never actually move.
     """
     untouchables = compute_untouchables(players)
+    untouchable_picks = compute_untouchable_picks(picks)
     my_profile = positional_profile(teams, my_team)
     my_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p], reverse=True)
-    my_picks_all = pick_assets(picks, my_team) if include_picks else []
+    my_picks_all = pick_assets(picks, my_team, exclude=untouchable_picks) if include_picks else []
 
     partners = trade_partner_scores(teams, my_team)
     results = []
@@ -2960,10 +2961,10 @@ def mutual_fit(
         partner = r["Team"]
         their_profile = positional_profile(teams, partner)
         their_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: their_profile[p], reverse=True)
-        their_picks_all = pick_assets(picks, partner) if include_picks else []
+        their_picks_all = pick_assets(picks, partner, exclude=untouchable_picks) if include_picks else []
 
         my_players_offer = player_assets(players, my_team, their_needs[:2], exclude=untouchables)
-        their_players_offer = player_assets(players, partner, my_needs[:2], exclude=untouchables)
+        their_players_offer = player_assets(players, partner, my_needs[:3], exclude=untouchables)
 
         my_offers = sorted(my_players_offer + my_picks_all, key=lambda a: -a["value"])[:max_offers]
         their_offers = sorted(their_players_offer + their_picks_all, key=lambda a: -a["value"])[:max_offers]
@@ -2974,7 +2975,7 @@ def mutual_fit(
                 "Fit Score": int(r["Fit Score"]),
                 "Window": r["Window"],
                 "their_needs": their_needs[:2],
-                "my_needs": my_needs[:2],
+                "my_needs": my_needs[:3],
                 "my_offers": my_offers,
                 "their_offers": their_offers,
             }
@@ -3005,14 +3006,39 @@ def player_assets(
     ]
 
 
-def pick_assets(picks: pd.DataFrame, team: str) -> list[dict[str, Any]]:
+def compute_untouchable_picks(picks: pd.DataFrame, protect_round: int = 1) -> set[tuple[int, int, str]]:
+    """Draft picks treated as cornerstone/protected trade assets: 1st-round
+    picks specifically, for whichever team currently owns them — the real
+    star-hit upside a 1st carries doesn't disappear just because the value
+    math on a trade would balance. 2nd-round picks and later are legitimate,
+    tradeable draft capital, especially the lower-value/later-slot ones.
+    """
+    protected: set[tuple[int, int, str]] = set()
+    for _, row in picks.iterrows():
+        if int(row["Round"]) <= protect_round:
+            protected.add((int(row["Season"]), int(row["Round"]), str(row["Original Team"])))
+    return protected
+
+
+def pick_assets(
+    picks: pd.DataFrame, team: str, exclude: set[tuple[int, int, str]] | None = None
+) -> list[dict[str, Any]]:
     owned = picks[picks["Current Owner"] == team].sort_values(["Season", "Round"])
     result = []
     for _, row in owned.iterrows():
+        key = (int(row["Season"]), int(row["Round"]), str(row["Original Team"]))
+        if exclude and key in exclude:
+            continue
         label = f'{int(row["Season"])} R{int(row["Round"])}'
         if row["Traded"]:
             label += f' ({str(row["Original Team"])[:10]})'
-        result.append({"label": label, "value": int(row["Value"]), "type": "pick"})
+        result.append(
+            {
+                "label": label, "value": int(row["Value"]), "type": "pick",
+                "season": int(row["Season"]), "round": int(row["Round"]),
+                "original_team": str(row["Original Team"]),
+            }
+        )
     return result
 
 
@@ -3061,13 +3087,15 @@ def build_trade_scenarios(
         ["QB", "RB", "WR", "TE"], key=lambda p: mine[p]
     )[:2]
 
-    # Neither side's untouchable cornerstone pieces are realistic trade
-    # chips, so they're excluded from both what we'd send and what we'd
+    # Neither side's untouchable cornerstone pieces — players or protected
+    # 1st-round picks — are realistic trade chips for an auto-generated
+    # scenario, so they're excluded from both what we'd send and what we'd
     # target from the partner.
+    untouchable_picks = compute_untouchable_picks(picks)
     targets = player_assets(players, partner, target_positions, exclude=untouchables)
     outgoing_players = player_assets(players, my_team, outgoing_positions, exclude=untouchables)
-    my_picks = pick_assets(picks, my_team)
-    their_picks = pick_assets(picks, partner)
+    my_picks = pick_assets(picks, my_team, exclude=untouchable_picks)
+    their_picks = pick_assets(picks, partner, exclude=untouchable_picks)
 
     scenarios = []
 
@@ -3172,8 +3200,10 @@ def selectable_assets(
     picks: pd.DataFrame,
     team: str,
     untouchables: set[str] | None = None,
+    untouchable_picks: set[tuple[int, int, str]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     untouchables = untouchables or set()
+    untouchable_picks = untouchable_picks or set()
     assets = {}
     for _, row in players[players["Team"] == team].sort_values("Value", ascending=False).iterrows():
         if int(row["Value"]) <= 0:
@@ -3182,11 +3212,17 @@ def selectable_assets(
         key = f'{lock}{row["Player"]} · {row["Position"]} · {int(row["Value"]):,}'
         assets[key] = {"label": row["Player"], "value": int(row["Value"]), "type": "player", "position": row["Position"]}
     for _, row in picks[picks["Current Owner"] == team].sort_values(["Season", "Round"]).iterrows():
+        pick_key = (int(row["Season"]), int(row["Round"]), str(row["Original Team"]))
+        lock = "🔒 " if pick_key in untouchable_picks else ""
         label = f'{int(row["Season"])} R{int(row["Round"])}'
         if row["Traded"]:
             label += f' ({str(row["Original Team"])[:10]})'
-        key = f'{label} · Pick · {int(row["Value"]):,}'
-        assets[key] = {"label": label, "value": int(row["Value"]), "type": "pick"}
+        key = f'{lock}{label} · Pick · {int(row["Value"]):,}'
+        assets[key] = {
+            "label": label, "value": int(row["Value"]), "type": "pick",
+            "season": int(row["Season"]), "round": int(row["Round"]),
+            "original_team": str(row["Original Team"]),
+        }
     return assets
 
 
@@ -3519,13 +3555,28 @@ def build_trade_strategy(
     teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame, team: str,
     untouchables: set[str], top_n: int = 4,
 ) -> dict[str, list[dict[str, Any]]]:
-    """'Look to trade' (my shoppable surplus at strong positions, cornerstones excluded)
-    and 'players to target' (best fits from other rosters at my weak spots, their
-    cornerstones excluded) — reusing the same logic as Team Needs' mutual fit."""
+    """'Look to trade' (my shoppable surplus at strong positions plus tradeable
+    draft capital, cornerstones excluded) and 'players to target' (best fits
+    from other rosters at my weak spots, their cornerstones excluded) —
+    reusing the same logic as Team Needs' mutual fit.
+
+    1st-round picks are treated as cornerstone assets and never suggested
+    here, regardless of exact value — the real star-hit upside on a 1st isn't
+    something a 'balanced' trade recommendation should casually shop. 2nd+
+    round picks are legitimate surplus, weighted toward suggesting the
+    lower-value ones first (the "lower-end 2nd," not the best pick owned).
+    """
     profile = positional_profile(teams, team)
     strengths = sorted(["QB", "RB", "WR", "TE"], key=lambda p: profile[p])[:2]
 
-    look_to_trade = player_assets(players, team, strengths, exclude=untouchables)[:top_n]
+    untouchable_picks = compute_untouchable_picks(picks)
+    tradeable_picks = sorted(
+        pick_assets(picks, team, exclude=untouchable_picks), key=lambda a: a["value"]
+    )
+    look_to_trade = (
+        player_assets(players, team, strengths, exclude=untouchables)[: top_n - 1]
+        + tradeable_picks[:1]
+    )[:top_n]
 
     fits = mutual_fit(teams, players, picks, team, max_offers=2, include_picks=False)
     seen: set[str] = set()
@@ -3555,8 +3606,9 @@ def render_custom_trade_builder(
         [x for x in teams["Team"].tolist() if x != team],
         key="manual_partner",
     )
-    mine = selectable_assets(players, picks, team, untouchables)
-    theirs = selectable_assets(players, picks, partner, untouchables)
+    untouchable_picks = compute_untouchable_picks(picks)
+    mine = selectable_assets(players, picks, team, untouchables, untouchable_picks)
+    theirs = selectable_assets(players, picks, partner, untouchables, untouchable_picks)
     devy_pool = devy_asset_pool(2027)
     rookie_pool = rookie_asset_pool(bundle, fc_rows, players, 2026)
     mine.update(rookie_pool)
@@ -3581,13 +3633,23 @@ def render_custom_trade_builder(
     send_value = package_value(send_assets)
     receive_value = package_value(receive_assets)
 
-    locked_outgoing = [a["label"] for a in send_assets if a["label"] in untouchables]
-    if locked_outgoing:
+    locked_outgoing_players = [a["label"] for a in send_assets if a["label"] in untouchables]
+    locked_outgoing_picks = [
+        a["label"] for a in send_assets
+        if a["type"] == "pick" and (a.get("season"), a.get("round"), a.get("original_team")) in untouchable_picks
+    ]
+    if locked_outgoing_players:
         st.warning(
-            f"🔒 {', '.join(locked_outgoing)} — flagged as this team's cornerstone at their "
+            f"🔒 {', '.join(locked_outgoing_players)} — flagged as this team's cornerstone at their "
             "position (clears the value floor, not yet aging out of the role). You can still "
             "build this trade, "
             "but it's not one the auto-generated scenarios would ever suggest."
+        )
+    if locked_outgoing_picks:
+        st.warning(
+            f"🔒 {', '.join(locked_outgoing_picks)} — a protected 1st-round pick. Real star-hit "
+            "upside on a 1st doesn't disappear just because a trade balances on paper. You can "
+            "still build this trade, but it's not one the auto-generated scenarios would suggest."
         )
 
     c1, c2, c3 = st.columns(3)
@@ -3944,6 +4006,12 @@ def render_trade_intelligence(
     my_untouchables = sorted(
         players[(players["Team"] == team) & (players["Player"].isin(untouchables))]["Player"]
     )
+    untouchable_picks = compute_untouchable_picks(picks)
+    my_protected_picks = sorted(
+        f'{int(row["Season"])} R{int(row["Round"])}'
+        for _, row in picks[picks["Current Owner"] == team].iterrows()
+        if (int(row["Season"]), int(row["Round"]), str(row["Original Team"])) in untouchable_picks
+    )
 
     render_html(
         f'<div class="gm-card"><b>{clean(team)}</b> is strongest at '
@@ -3955,6 +4023,12 @@ def render_trade_intelligence(
             "auto-generated scenarios below, but still selectable in the custom builder."
             if my_untouchables else
             f"<br>No {clean(team)} player currently clears the untouchable bar."
+        )
+        + (
+            f'<br><b>🔒 Protected picks:</b> {clean(", ".join(my_protected_picks))} — 1st-round '
+            "picks stay off auto-generated scenarios regardless of value; 2nd-round+ picks are "
+            "treated as real, tradeable capital."
+            if my_protected_picks else ""
         )
         + '</div>'
     )
