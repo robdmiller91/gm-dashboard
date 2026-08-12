@@ -2469,8 +2469,10 @@ def render_team_blueprint(
 
     st.divider()
     st.markdown("#### Cornerstone Assets")
-    st.caption("Each team's own best player at QB/RB/WR/TE — adjust the value floor in Trade Centre.")
+    st.caption("Each team's own best player at QB/RB/WR/TE, plus anything you've manually protected — adjust in Trade Centre.")
     untouchables = compute_untouchables(players)
+    manual_players, _ = get_manual_untouchables(team)
+    untouchables = untouchables | manual_players
     my_cornerstones = players[(players["Team"] == team) & (players["Player"].isin(untouchables))]
     if my_cornerstones.empty:
         st.info("No player currently clears the untouchable bar for this team.")
@@ -2490,7 +2492,10 @@ def render_team_blueprint(
     col7, col8 = st.columns(2)
     with col7:
         st.markdown("**Look To Trade**")
-        st.caption("Surplus at strong positions plus tradeable picks (1sts protected).")
+        st.caption(
+            "Independent options worth considering — not a package. A real trade could be just "
+            "one of these for one target below, not all of them at once."
+        )
         if not strategy["look_to_trade"]:
             st.info("No clear surplus assets right now.")
         else:
@@ -2504,7 +2509,10 @@ def render_team_blueprint(
             render_html(f'<div class="roster-strip">{cards}</div>')
     with col8:
         st.markdown("**Players To Target**")
-        st.caption("Best fits from other rosters at your weak spots, their cornerstones excluded.")
+        st.caption(
+            "Individual targets, not a bundle — for full control over exactly who's involved and "
+            "how many pieces, use the Custom Trade Builder in Trade Centre."
+        )
         if not strategy["targets"]:
             st.info("No standout targets found.")
         else:
@@ -2951,6 +2959,9 @@ def mutual_fit(
     """
     untouchables = compute_untouchables(players)
     untouchable_picks = compute_untouchable_picks(picks)
+    manual_players, manual_picks = get_manual_untouchables(my_team)
+    untouchables = untouchables | manual_players
+    untouchable_picks = untouchable_picks | manual_picks
     my_profile = positional_profile(teams, my_team)
     my_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p], reverse=True)
     my_picks_all = pick_assets(picks, my_team, exclude=untouchable_picks) if include_picks else []
@@ -3004,6 +3015,18 @@ def player_assets(
         for _, row in owned.iterrows()
         if int(row["Value"]) > 0
     ]
+
+
+def get_manual_untouchables(team: str) -> tuple[set[str], set[tuple[int, int, str]]]:
+    """User-specified additional players/picks to protect, on top of whatever
+    the automatic cornerstone algorithm picks — e.g. a TE2 you personally
+    value more than the algorithm does, or a specific incoming pick you're
+    not willing to move. Persists across pages within a session, scoped per
+    team so switching teams doesn't leak one team's overrides into another's.
+    """
+    player_names = set(st.session_state.get(f"manual_untouchable_players_{team}", []))
+    pick_tuples = {tuple(p) for p in st.session_state.get(f"manual_untouchable_picks_{team}", [])}
+    return player_names, pick_tuples
 
 
 def compute_untouchable_picks(picks: pd.DataFrame, protect_round: int = 1) -> set[tuple[int, int, str]]:
@@ -3090,8 +3113,12 @@ def build_trade_scenarios(
     # Neither side's untouchable cornerstone pieces — players or protected
     # 1st-round picks — are realistic trade chips for an auto-generated
     # scenario, so they're excluded from both what we'd send and what we'd
-    # target from the partner.
+    # target from the partner. Manual overrides for my_team are unioned in
+    # too — the automatic rules are a starting point, not the final word.
     untouchable_picks = compute_untouchable_picks(picks)
+    manual_players, manual_picks = get_manual_untouchables(my_team)
+    untouchables = untouchables | manual_players
+    untouchable_picks = untouchable_picks | manual_picks
     targets = player_assets(players, partner, target_positions, exclude=untouchables)
     outgoing_players = player_assets(players, my_team, outgoing_positions, exclude=untouchables)
     my_picks = pick_assets(picks, my_team, exclude=untouchable_picks)
@@ -3553,7 +3580,7 @@ def outlook_labels(players: pd.DataFrame, team: str) -> list[str]:
 
 def build_trade_strategy(
     teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame, team: str,
-    untouchables: set[str], top_n: int = 4,
+    untouchables: set[str], top_n: int = 3,
 ) -> dict[str, list[dict[str, Any]]]:
     """'Look to trade' (my shoppable surplus at strong positions plus tradeable
     draft capital, cornerstones excluded) and 'players to target' (best fits
@@ -3570,6 +3597,8 @@ def build_trade_strategy(
     strengths = sorted(["QB", "RB", "WR", "TE"], key=lambda p: profile[p])[:2]
 
     untouchable_picks = compute_untouchable_picks(picks)
+    _, manual_picks = get_manual_untouchables(team)
+    untouchable_picks = untouchable_picks | manual_picks
     tradeable_picks = sorted(
         pick_assets(picks, team, exclude=untouchable_picks), key=lambda a: a["value"]
     )
@@ -4003,10 +4032,43 @@ def render_trade_intelligence(
             ),
         )
     untouchables = compute_untouchables(players, min_value=min_cornerstone_value)
+    untouchable_picks = compute_untouchable_picks(picks)
+
+    with st.expander("Manually protect additional players or picks", expanded=False):
+        st.caption(
+            "The automatic rules above are a starting point, not the final word. Add anyone else "
+            "you personally consider off-limits — a TE2 you value more than the algorithm does, a "
+            "specific incoming pick you're not willing to move, whatever's true for your team."
+        )
+        roster_players = sorted(
+            players[(players["Team"] == team) & (players["Value"] > 0)]["Player"]
+        )
+        st.multiselect(
+            "Players to protect manually",
+            roster_players,
+            key=f"manual_untouchable_players_{team}",
+        )
+        team_picks = picks[picks["Current Owner"] == team].sort_values("Value", ascending=False)
+        pick_label_map: dict[str, tuple[int, int, str]] = {}
+        for _, row in team_picks.iterrows():
+            label = f'{int(row["Season"])} R{int(row["Round"])}'
+            if row["Traded"]:
+                label += f' (via {row["Original Team"]})'
+            pick_label_map[label] = (int(row["Season"]), int(row["Round"]), str(row["Original Team"]))
+        chosen_pick_labels = st.multiselect(
+            "Picks to protect manually", list(pick_label_map.keys()), key=f"manual_pick_labels_{team}"
+        )
+        st.session_state[f"manual_untouchable_picks_{team}"] = [
+            pick_label_map[label] for label in chosen_pick_labels
+        ]
+
+    manual_players, manual_picks = get_manual_untouchables(team)
+    untouchables = untouchables | manual_players
+    untouchable_picks = untouchable_picks | manual_picks
+
     my_untouchables = sorted(
         players[(players["Team"] == team) & (players["Player"].isin(untouchables))]["Player"]
     )
-    untouchable_picks = compute_untouchable_picks(picks)
     my_protected_picks = sorted(
         f'{int(row["Season"])} R{int(row["Round"])}'
         for _, row in picks[picks["Current Owner"] == team].iterrows()
