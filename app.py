@@ -2469,10 +2469,8 @@ def render_team_blueprint(
 
     st.divider()
     st.markdown("#### Cornerstone Assets")
-    st.caption("Each team's own best player at QB/RB/WR/TE, plus anything you've manually protected — adjust in Trade Centre.")
-    untouchables = compute_untouchables(players)
-    manual_players, _ = get_manual_untouchables(team)
-    untouchables = untouchables | manual_players
+    st.caption("Each team's own best player at QB/RB/WR/TE, plus anything you've manually protected — adjust in Team Needs or Trade Centre.")
+    untouchables, _ = apply_manual_overrides(team, compute_untouchables(players), set())
     my_cornerstones = players[(players["Team"] == team) & (players["Player"].isin(untouchables))]
     if my_cornerstones.empty:
         st.info("No player currently clears the untouchable bar for this team.")
@@ -2942,7 +2940,7 @@ def mutual_fit(
     players: pd.DataFrame,
     picks: pd.DataFrame,
     my_team: str,
-    max_offers: int = 4,
+    max_offers: int | None = 4,
     include_picks: bool = True,
 ) -> list[dict[str, Any]]:
     """For every other team, work out what each side's roster could do for the other.
@@ -2957,11 +2955,9 @@ def mutual_fit(
     from both sides — a mutual fit isn't realistic if it hinges on someone
     giving up a piece they'd never actually move.
     """
-    untouchables = compute_untouchables(players)
-    untouchable_picks = compute_untouchable_picks(picks)
-    manual_players, manual_picks = get_manual_untouchables(my_team)
-    untouchables = untouchables | manual_players
-    untouchable_picks = untouchable_picks | manual_picks
+    untouchables, untouchable_picks = apply_manual_overrides(
+        my_team, compute_untouchables(players), compute_untouchable_picks(picks)
+    )
     my_profile = positional_profile(teams, my_team)
     my_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p], reverse=True)
     my_picks_all = pick_assets(picks, my_team, exclude=untouchable_picks) if include_picks else []
@@ -2977,8 +2973,15 @@ def mutual_fit(
         my_players_offer = player_assets(players, my_team, their_needs[:2], exclude=untouchables)
         their_players_offer = player_assets(players, partner, my_needs[:3], exclude=untouchables)
 
-        my_offers = sorted(my_players_offer + my_picks_all, key=lambda a: -a["value"])[:max_offers]
-        their_offers = sorted(their_players_offer + their_picks_all, key=lambda a: -a["value"])[:max_offers]
+        my_offers_all = sorted(my_players_offer + my_picks_all, key=lambda a: -a["value"])
+        their_offers_all = sorted(their_players_offer + their_picks_all, key=lambda a: -a["value"])
+        # Show a balanced number of options on each side — a card with 2 on
+        # one side and 1 on the other doesn't read as a real comparison.
+        balanced_count = min(len(my_offers_all), len(their_offers_all))
+        if max_offers is not None:
+            balanced_count = min(balanced_count, max_offers)
+        my_offers = my_offers_all[:balanced_count]
+        their_offers = their_offers_all[:balanced_count]
 
         results.append(
             {
@@ -3017,16 +3020,35 @@ def player_assets(
     ]
 
 
-def get_manual_untouchables(team: str) -> tuple[set[str], set[tuple[int, int, str]]]:
-    """User-specified additional players/picks to protect, on top of whatever
-    the automatic cornerstone algorithm picks — e.g. a TE2 you personally
-    value more than the algorithm does, or a specific incoming pick you're
-    not willing to move. Persists across pages within a session, scoped per
-    team so switching teams doesn't leak one team's overrides into another's.
+def get_manual_untouchables(
+    team: str,
+) -> tuple[set[str], set[tuple[int, int, str]], set[str], set[tuple[int, int, str]]]:
+    """User-specified overrides on top of the automatic cornerstone algorithm,
+    scoped per team, persisting across pages within a session:
+      - players/picks manually ADDED as protected (on top of the automatic list)
+      - players/picks manually ALLOWED to trade (overriding an automatic flag —
+        e.g. the algorithm calls Colston Loveland a cornerstone, but you're
+        actually willing to move him)
+    Returns (added_players, added_picks, allowed_players, allowed_picks).
     """
-    player_names = set(st.session_state.get(f"manual_untouchable_players_{team}", []))
-    pick_tuples = {tuple(p) for p in st.session_state.get(f"manual_untouchable_picks_{team}", [])}
-    return player_names, pick_tuples
+    added_players = set(st.session_state.get(f"manual_untouchable_players_{team}", []))
+    added_picks = {tuple(p) for p in st.session_state.get(f"manual_untouchable_picks_{team}", [])}
+    allowed_players = set(st.session_state.get(f"manual_allowed_players_{team}", []))
+    allowed_picks = {tuple(p) for p in st.session_state.get(f"manual_allowed_picks_{team}", [])}
+    return added_players, added_picks, allowed_players, allowed_picks
+
+
+def apply_manual_overrides(
+    team: str, auto_players: set[str], auto_picks: set[tuple[int, int, str]]
+) -> tuple[set[str], set[tuple[int, int, str]]]:
+    """Combine the automatic cornerstone sets with this team's manual
+    overrides: anything manually added gets included, anything manually
+    allowed gets removed — even if the algorithm would otherwise protect it.
+    """
+    added_players, added_picks, allowed_players, allowed_picks = get_manual_untouchables(team)
+    players = (auto_players | added_players) - allowed_players
+    picks = (auto_picks | added_picks) - allowed_picks
+    return players, picks
 
 
 def compute_untouchable_picks(picks: pd.DataFrame, protect_round: int = 1) -> set[tuple[int, int, str]]:
@@ -3113,12 +3135,11 @@ def build_trade_scenarios(
     # Neither side's untouchable cornerstone pieces — players or protected
     # 1st-round picks — are realistic trade chips for an auto-generated
     # scenario, so they're excluded from both what we'd send and what we'd
-    # target from the partner. Manual overrides for my_team are unioned in
-    # too — the automatic rules are a starting point, not the final word.
-    untouchable_picks = compute_untouchable_picks(picks)
-    manual_players, manual_picks = get_manual_untouchables(my_team)
-    untouchables = untouchables | manual_players
-    untouchable_picks = untouchable_picks | manual_picks
+    # target from the partner. Manual overrides for my_team are applied too
+    # (both added protections and explicit "allow trading" exceptions).
+    untouchables, untouchable_picks = apply_manual_overrides(
+        my_team, untouchables, compute_untouchable_picks(picks)
+    )
     targets = player_assets(players, partner, target_positions, exclude=untouchables)
     outgoing_players = player_assets(players, my_team, outgoing_positions, exclude=untouchables)
     my_picks = pick_assets(picks, my_team, exclude=untouchable_picks)
@@ -3596,9 +3617,9 @@ def build_trade_strategy(
     profile = positional_profile(teams, team)
     strengths = sorted(["QB", "RB", "WR", "TE"], key=lambda p: profile[p])[:2]
 
-    untouchable_picks = compute_untouchable_picks(picks)
-    _, manual_picks = get_manual_untouchables(team)
-    untouchable_picks = untouchable_picks | manual_picks
+    untouchables, untouchable_picks = apply_manual_overrides(
+        team, untouchables, compute_untouchable_picks(picks)
+    )
     tradeable_picks = sorted(
         pick_assets(picks, team, exclude=untouchable_picks), key=lambda a: a["value"]
     )
@@ -3798,10 +3819,52 @@ def render_team_needs(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.Data
             pick_label_map[label] for label in chosen_pick_labels
         ]
 
-    max_offers = st.slider(
-        "Offers to show per side", min_value=1, max_value=10, value=4,
-        help="How many players/picks to surface per side on each card below — not a fixed package "
-        "size, just how many individual options to browse.",
+    with st.expander("Override: allow trading something the automatic rules protect", expanded=False):
+        st.caption(
+            "The algorithm might flag someone as a cornerstone that you're actually willing to "
+            "move — e.g. it protects your TE1, but you'd trade him anyway. Pick them here to "
+            "explicitly un-protect them, everywhere in the app."
+        )
+        auto_untouchables = compute_untouchables(players)
+        auto_untouchable_picks = compute_untouchable_picks(picks)
+        auto_protected_players = sorted(
+            players[(players["Team"] == my_team) & (players["Player"].isin(auto_untouchables))]["Player"]
+        )
+        st.multiselect(
+            "Players to allow trading (override automatic protection)",
+            auto_protected_players,
+            key=f"manual_allowed_players_{my_team}",
+        )
+        auto_protected_pick_rows = picks[
+            (picks["Current Owner"] == my_team)
+            & picks.apply(
+                lambda r: (int(r["Season"]), int(r["Round"]), str(r["Original Team"])) in auto_untouchable_picks,
+                axis=1,
+            )
+        ]
+        allow_pick_label_map: dict[str, tuple[int, int, str]] = {}
+        for _, row in auto_protected_pick_rows.iterrows():
+            label = f'{int(row["Season"])} R{int(row["Round"])}'
+            if row["Traded"]:
+                label += f' (via {row["Original Team"]})'
+            allow_pick_label_map[label] = (int(row["Season"]), int(row["Round"]), str(row["Original Team"]))
+        chosen_allow_labels = st.multiselect(
+            "Picks to allow trading (override automatic protection)",
+            list(allow_pick_label_map.keys()), key=f"manual_allow_pick_labels_{my_team}",
+        )
+        st.session_state[f"manual_allowed_picks_{my_team}"] = [
+            allow_pick_label_map[label] for label in chosen_allow_labels
+        ]
+
+    limit_offers = st.checkbox(
+        "Limit how many offers show per side",
+        value=False,
+        help="Off by default — shows every eligible player/pick, not a fixed number. Turn this on "
+        "if you'd rather see a shorter, curated list instead of everything available.",
+    )
+    max_offers = (
+        st.slider("Offers to show per side", min_value=1, max_value=15, value=4)
+        if limit_offers else None
     )
 
     render_html(
@@ -4097,9 +4160,42 @@ def render_trade_intelligence(
             pick_label_map[label] for label in chosen_pick_labels
         ]
 
-    manual_players, manual_picks = get_manual_untouchables(team)
-    untouchables = untouchables | manual_players
-    untouchable_picks = untouchable_picks | manual_picks
+    with st.expander("Override: allow trading something the automatic rules protect", expanded=False):
+        st.caption(
+            "The algorithm might flag someone as a cornerstone that you're actually willing to "
+            "move — e.g. it protects your TE1, but you'd trade him anyway. Pick them here to "
+            "explicitly un-protect them, everywhere in the app."
+        )
+        auto_protected_players = sorted(
+            players[(players["Team"] == team) & (players["Player"].isin(untouchables))]["Player"]
+        )
+        st.multiselect(
+            "Players to allow trading (override automatic protection)",
+            auto_protected_players,
+            key=f"manual_allowed_players_{team}",
+        )
+        auto_protected_pick_rows = picks[
+            (picks["Current Owner"] == team)
+            & picks.apply(
+                lambda r: (int(r["Season"]), int(r["Round"]), str(r["Original Team"])) in untouchable_picks,
+                axis=1,
+            )
+        ]
+        allow_pick_label_map: dict[str, tuple[int, int, str]] = {}
+        for _, row in auto_protected_pick_rows.iterrows():
+            label = f'{int(row["Season"])} R{int(row["Round"])}'
+            if row["Traded"]:
+                label += f' (via {row["Original Team"]})'
+            allow_pick_label_map[label] = (int(row["Season"]), int(row["Round"]), str(row["Original Team"]))
+        chosen_allow_labels = st.multiselect(
+            "Picks to allow trading (override automatic protection)",
+            list(allow_pick_label_map.keys()), key=f"manual_allow_pick_labels_{team}",
+        )
+        st.session_state[f"manual_allowed_picks_{team}"] = [
+            allow_pick_label_map[label] for label in chosen_allow_labels
+        ]
+
+    untouchables, untouchable_picks = apply_manual_overrides(team, untouchables, untouchable_picks)
 
     my_untouchables = sorted(
         players[(players["Team"] == team) & (players["Player"].isin(untouchables))]["Player"]
