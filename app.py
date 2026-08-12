@@ -3894,28 +3894,78 @@ def render_team_needs(
     ]
     untouchables, untouchable_picks = compute_effective_cornerstones(picks, my_team)
 
-    all_players_pool = players[players["Value"] > 0].sort_values("Value", ascending=False)
-    if all_players_pool.empty:
-        st.info("No valued players found in the league.")
+    concept_pool = build_asset_pool(players, picks, show_team_label=True)
+    if not concept_pool:
+        st.info("No valued players or picks found in the league.")
         return
-    concept_player = st.selectbox(
-        "Player to build a trade concept around",
-        all_players_pool["Player"].tolist(), key="needs_concept_player",
+    concept_labels = st.multiselect(
+        "Players/picks to build a trade concept around — any combination, any teams",
+        list(concept_pool.keys()), key="needs_concept_assets",
+        help=(
+            "Pick only your own assets to see who'd want them and what they'd pay back. Pick only "
+            "another team's assets to see what you could realistically offer for them. Pick from "
+            "both sides to see that exact trade valued directly."
+        ),
     )
-    prow = all_players_pool[all_players_pool["Player"] == concept_player].iloc[0]
-    concept_team = prow["Team"]
-    concept_value = int(prow["Value"])
+    if not concept_labels:
+        st.info("Select at least one player or pick above to see trade concepts.")
+        return
+    concept_assets = [concept_pool[label] for label in concept_labels]
+
     my_profile = positional_profile(teams, my_team)
     my_strengths = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p])[:2]
     my_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p], reverse=True)[:2]
 
-    if concept_team == my_team:
-        if concept_player in untouchables:
-            st.warning(f"{clean(concept_player)} is one of your cornerstones — pick someone else, or remove them above.")
-            return
+    mine = [a for a in concept_assets if a["team"] == my_team]
+    theirs = [a for a in concept_assets if a["team"] != my_team]
+    other_teams_involved = sorted({a["team"] for a in theirs})
+
+    protected_selected = [
+        a for a in mine
+        if (a["type"] == "player" and a["label"] in untouchables)
+        or (a["type"] == "pick" and (a.get("season"), a.get("round"), a.get("original_team")) in untouchable_picks)
+    ]
+    if protected_selected:
+        st.warning(
+            f"{clean(', '.join(a['label'] for a in protected_selected))} — one of these is a "
+            "cornerstone. Remove it above, or un-protect it, to include it in a concept."
+        )
+        return
+
+    if len(other_teams_involved) > 1:
+        st.warning(
+            "You've selected assets from more than one other team — a real trade only has two "
+            f"sides. Pick from yourself and just one of {clean(', '.join(other_teams_involved))} at a time."
+        )
+        return
+
+    if mine and theirs:
+        # Both sides specified directly — just value it, no suggestion needed.
+        partner = other_teams_involved[0]
+        mine_value = package_value(mine)
+        theirs_value = package_value(theirs)
+        partner_row = teams[teams["Team"] == partner]
+        window = partner_row.iloc[0]["Window"] if not partner_row.empty else ""
+        render_html(
+            f'<div class="trade-card">'
+            f'<div class="trade-card-top"><div><b>{clean(partner)}</b>'
+            f'<div class="small-muted">{clean(window)}</div></div></div>'
+            f'<div class="trade-grid"><div class="trade-side">'
+            f'<div class="trade-side-title">You send ({mine_value:,})</div>'
+            f'{assets_html(mine)}</div>'
+            f'<div class="trade-arrow">⇄</div>'
+            f'<div class="trade-side"><div class="trade-side-title">You receive ({theirs_value:,})</div>'
+            f'{assets_html(theirs)}</div></div>'
+            f'<div class="trade-rationale">Net value: {theirs_value - mine_value:+,}.</div>'
+            f'</div>'
+        )
+
+    elif mine and not theirs:
+        concept_value = package_value(mine)
+        mine_positions = {a["position"] for a in mine if a["type"] == "player"}
         st.caption(
-            f"{clean(concept_player)} is on your roster ({int(prow['Value']):,} value) — finding teams that "
-            "need this position, with a value-matched return from your actual needs."
+            f"Your package ({concept_value:,} value) — finding teams that fit, with a "
+            "value-matched return from your actual needs."
         )
         partners = trade_partner_scores(teams, my_team)
         shown = 0
@@ -3923,7 +3973,10 @@ def render_team_needs(
             partner = partner_row["Team"]
             partner_profile = positional_profile(teams, partner)
             their_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: partner_profile[p], reverse=True)[:2]
-            if prow["Position"] not in their_needs:
+            # Picks fit any team; players only make sense to a team that
+            # actually needs that position — gate on ANY overlap when the
+            # package includes players at all.
+            if mine_positions and not (mine_positions & set(their_needs)):
                 continue
             partner_untouchables, partner_untouchable_picks = compute_effective_cornerstones(picks, partner)
             candidate_pool = (
@@ -3936,8 +3989,12 @@ def render_team_needs(
             if not return_package:
                 continue
             return_value = package_value(return_package)
-            give_assets_display = [{"label": concept_player, "value": concept_value, "type": "player"}]
 
+            fit_reason = (
+                f'{clean(partner)} needs {clean("/".join(sorted(mine_positions)))} — overlapping your package'
+                if mine_positions else
+                f'{clean(partner)} is a strong overall fit for extra draft capital'
+            )
             render_html(
                 f'<div class="trade-card">'
                 f'<div class="trade-card-top"><div><b>{clean(partner)}</b>'
@@ -3945,27 +4002,26 @@ def render_team_needs(
                 f'<span class="fit-badge">{int(partner_row["Fit Score"])} fit</span></div>'
                 f'<div class="trade-grid"><div class="trade-side">'
                 f'<div class="trade-side-title">You send ({concept_value:,})</div>'
-                f'{assets_html(give_assets_display)}</div>'
+                f'{assets_html(mine)}</div>'
                 f'<div class="trade-arrow">⇄</div>'
                 f'<div class="trade-side"><div class="trade-side-title">You receive ({return_value:,})</div>'
                 f'{assets_html(return_package)}</div></div>'
-                f'<div class="trade-rationale">{clean(partner)} needs {clean(prow["Position"])} — '
-                f'right where this trade delivers — and can pay you back at {clean("/".join(my_needs))}, '
-                f'your actual need.</div>'
+                f'<div class="trade-rationale">{fit_reason} — and can pay you back at '
+                f'{clean("/".join(my_needs))}, your actual need.</div>'
                 f'</div>'
             )
             shown += 1
             if shown >= 8:
                 break
         if shown == 0:
-            st.info(
-                f"No team currently needs {clean(prow['Position'])} enough to match this — "
-                "try a different player."
-            )
+            st.info("No value-matched fit found for this package — try adjusting your selection.")
+
     else:
+        concept_team = other_teams_involved[0]
+        concept_value = package_value(theirs)
         st.caption(
-            f"{clean(concept_player)} plays for {clean(concept_team)} ({int(prow['Value']):,} value) — "
-            "finding what you could realistically offer from your own strengths to get him."
+            f"{clean(concept_team)}'s package ({concept_value:,} value) — finding what you could "
+            "realistically offer from your own strengths to get it."
         )
         my_candidate_pool = (
             player_assets(players, my_team, my_strengths, exclude=untouchables)
@@ -3979,7 +4035,6 @@ def render_team_needs(
             st.info("No reasonable value-matched offer found.")
             return
         offer_value = package_value(offer_package)
-        receive_display = [{"label": concept_player, "value": concept_value, "type": "player"}]
 
         render_html(
             f'<div class="trade-card">'
@@ -3989,7 +4044,7 @@ def render_team_needs(
             f'{assets_html(offer_package)}</div>'
             f'<div class="trade-arrow">⇄</div>'
             f'<div class="trade-side"><div class="trade-side-title">You receive ({concept_value:,})</div>'
-            f'{assets_html(receive_display)}</div></div>'
+            f'{assets_html(theirs)}</div></div>'
             f'<div class="trade-rationale">Built from your strengths at {clean("/".join(my_strengths))} — '
             "the positions you'd actually have realistic surplus to offer from.</div>"
             f'</div>'
