@@ -4108,6 +4108,107 @@ def render_draft(picks: pd.DataFrame, teams: pd.DataFrame) -> None:
 DEVY_PROSPECTS_PATH = "devy_prospects.csv"
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_transactions(league_id: str, week: int) -> list[dict[str, Any]]:
+    try:
+        return get_json(f"{SLEEPER_BASE}/league/{league_id}/transactions/{week}")
+    except DataError:
+        return []
+
+
+def load_all_trades(bundle: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every completed trade across this league's full history, walking the
+    same previous_league_id chain as Draft History, normalized into simple
+    records tracked by stable Sleeper user_id underneath — so a manager's
+    trade history stays together even if their team name changed.
+    """
+    league_id = str(bundle["league"].get("league_id") or LEAGUE_ID)
+    history = load_draft_history(league_id)
+    if not history:
+        history = [
+            {
+                "season": bundle["league"].get("season"), "league_id": league_id,
+                "users": bundle["users"], "rosters": bundle["rosters"],
+            }
+        ]
+
+    player_meta = bundle["players"]
+    trades = []
+    for entry in history:
+        season = entry.get("season")
+        season_league_id = entry.get("league_id")
+        if not season_league_id:
+            continue
+        users_map = {str(u.get("user_id")): team_name(u) for u in entry.get("users") or []}
+        roster_to_uid = {
+            int(r["roster_id"]): str(r.get("owner_id"))
+            for r in entry.get("rosters") or []
+        }
+
+        def team_at_time(rid: int | None) -> tuple[str, str]:
+            if rid is None:
+                return "", "Unknown"
+            uid = roster_to_uid.get(int(rid), "")
+            return uid, users_map.get(uid, f"Roster {rid}")
+
+        for week in range(1, 19):
+            for tx in load_transactions(season_league_id, week):
+                if tx.get("type") != "trade" or tx.get("status") != "complete":
+                    continue
+
+                roster_ids = tx.get("roster_ids") or []
+                uids_involved = sorted({team_at_time(rid)[0] for rid in roster_ids if team_at_time(rid)[0]})
+
+                adds = tx.get("adds") or {}
+                drops = tx.get("drops") or {}
+                players_moved = []
+                for pid, to_rid in adds.items():
+                    from_rid = drops.get(pid)
+                    meta = player_meta.get(str(pid), {}) or {}
+                    name = (
+                        meta.get("full_name")
+                        or " ".join(filter(None, [meta.get("first_name"), meta.get("last_name")]))
+                        or str(pid)
+                    )
+                    to_uid, to_name = team_at_time(to_rid)
+                    from_uid, from_name = team_at_time(from_rid)
+                    players_moved.append(
+                        {
+                            "player": name, "position": meta.get("position") or "",
+                            "to_uid": to_uid, "to_team": to_name,
+                            "from_uid": from_uid, "from_team": from_name,
+                            "image": player_image_url({"player_id": pid}),
+                        }
+                    )
+
+                picks_moved = []
+                for p in tx.get("draft_picks") or []:
+                    to_uid, to_name = team_at_time(p.get("owner_id"))
+                    from_uid, from_name = team_at_time(p.get("previous_owner_id"))
+                    picks_moved.append(
+                        {
+                            "season": p.get("season"), "round": p.get("round"),
+                            "to_uid": to_uid, "to_team": to_name,
+                            "from_uid": from_uid, "from_team": from_name,
+                        }
+                    )
+
+                if not players_moved and not picks_moved:
+                    continue
+
+                trades.append(
+                    {
+                        "season": season, "week": week, "user_ids": uids_involved,
+                        "players_moved": players_moved, "picks_moved": picks_moved,
+                        "timestamp": tx.get("created") or 0,
+                        "transaction_id": tx.get("transaction_id"),
+                    }
+                )
+
+    trades.sort(key=lambda t: t["timestamp"], reverse=True)
+    return trades
+
+
 def render_trade_history(bundle: dict[str, Any], teams: pd.DataFrame) -> None:
     render_brand("Trade History", "Every completed trade across this league's history")
 
@@ -4465,6 +4566,140 @@ def load_previous_rosters(previous_league_id: str | None) -> list[dict[str, Any]
         return get_json(f"{SLEEPER_BASE}/league/{previous_league_id}/rosters")
     except DataError:
         return []
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_draft_history(league_id: str) -> list[dict[str, Any]]:
+    """Walk the league's previous_league_id chain, collecting each season's
+    users/rosters/drafts.
+
+    Sleeper represents each season as its own league object, linked backward
+    via previous_league_id. There's no single endpoint for "all history," so
+    this walks the chain until it runs out (or hits a cycle/missing league).
+    """
+    history: list[dict[str, Any]] = []
+    current_id = league_id
+    seen_ids: set[str] = set()
+    while current_id and current_id != "0" and current_id not in seen_ids:
+        seen_ids.add(current_id)
+        try:
+            league_obj = get_json(f"{SLEEPER_BASE}/league/{current_id}")
+        except DataError:
+            break
+        if not league_obj:
+            break
+        try:
+            users = get_json(f"{SLEEPER_BASE}/league/{current_id}/users")
+        except DataError:
+            users = []
+        try:
+            rosters = get_json(f"{SLEEPER_BASE}/league/{current_id}/rosters")
+        except DataError:
+            rosters = []
+        try:
+            drafts = get_json(f"{SLEEPER_BASE}/league/{current_id}/drafts")
+        except DataError:
+            drafts = []
+        history.append(
+            {
+                "season": league_obj.get("season"),
+                "league_id": current_id,
+                "users": users or [],
+                "rosters": rosters or [],
+                "drafts": drafts or [],
+            }
+        )
+        current_id = league_obj.get("previous_league_id")
+    return history
+
+
+def build_draft_board(season_entry: dict[str, Any]) -> pd.DataFrame:
+    """Actual draft results for one season, one row per pick, ready for a grid view."""
+    drafts = season_entry.get("drafts") or []
+    draft = next((d for d in drafts if (d.get("type") or "").lower() != "auction"), None)
+    if draft is None and drafts:
+        draft = drafts[0]
+    if not draft or not draft.get("draft_id"):
+        return pd.DataFrame()
+
+    try:
+        raw_picks = get_json(f"{SLEEPER_BASE}/draft/{draft['draft_id']}/picks")
+    except DataError:
+        return pd.DataFrame()
+    if not raw_picks:
+        return pd.DataFrame()
+
+    users = {str(u.get("user_id")): team_name(u) for u in season_entry.get("users") or []}
+    rosters = season_entry.get("rosters") or []
+    roster_to_team = {
+        int(r["roster_id"]): users.get(str(r.get("owner_id")), f"Roster {r['roster_id']}")
+        for r in rosters
+    }
+    user_to_roster = {
+        str(r.get("owner_id")): int(r["roster_id"]) for r in rosters if r.get("owner_id")
+    }
+
+    # Resolve slot -> ORIGINAL owning roster: primary source is the draft
+    # object's own slot_to_roster_id map; fall back to draft_order (user_id
+    # -> slot) cross-referenced against rosters if that's missing.
+    slot_to_roster_id: dict[int, int] = {}
+    for slot_str, rid in (draft.get("slot_to_roster_id") or {}).items():
+        try:
+            slot_to_roster_id[int(slot_str)] = int(rid)
+        except (TypeError, ValueError):
+            continue
+    if not slot_to_roster_id:
+        for uid, slot in (draft.get("draft_order") or {}).items():
+            rid = user_to_roster.get(str(uid))
+            if rid is not None:
+                try:
+                    slot_to_roster_id[int(slot)] = rid
+                except (TypeError, ValueError):
+                    continue
+
+    rows = []
+    for p in raw_picks:
+        rnd, pick_no = p.get("round"), p.get("pick_no")
+        if rnd is None or pick_no is None:
+            continue
+        draft_slot = p.get("draft_slot")
+        actual_rid = p.get("roster_id")
+
+        original_rid = slot_to_roster_id.get(int(draft_slot)) if draft_slot is not None else None
+        if original_rid is None:
+            # No trade info available for this slot — best we can do is
+            # assume no trade happened (original == actual drafter).
+            original_rid = actual_rid
+        original_team = (
+            roster_to_team.get(int(original_rid), f"Roster {original_rid}")
+            if original_rid is not None else "Unknown"
+        )
+        actual_team = (
+            roster_to_team.get(int(actual_rid), f"Roster {actual_rid}")
+            if actual_rid is not None else "Unknown"
+        )
+
+        meta = p.get("metadata") or {}
+        player_name = " ".join(
+            filter(None, [meta.get("first_name"), meta.get("last_name")])
+        ) or str(p.get("player_id") or "Unknown")
+
+        rows.append(
+            {
+                "Round": int(rnd),
+                "Pick No": int(pick_no),
+                "Slot": int(draft_slot) if draft_slot is not None else int(pick_no),
+                "Original Team": original_team,
+                "Team": actual_team,
+                "Traded": original_team != actual_team,
+                "Player": player_name,
+                "Position": meta.get("position") or "",
+                "NFL Team": meta.get("team") or "",
+                "Image": player_image_url({"player_id": p.get("player_id")}),
+                "Is Keeper": bool(p.get("is_keeper")),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 @st.cache_data(ttl=900, show_spinner=False)
