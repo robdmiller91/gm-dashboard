@@ -3769,6 +3769,41 @@ def render_team_needs(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.Data
     my_strengths = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p])[:2]
     my_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p], reverse=True)[:2]
 
+    with st.expander("Manually protect additional players or picks", expanded=False):
+        st.caption(
+            "Automatic rules protect each team's own best player per position, plus any 1st-round "
+            "pick, as a starting point — not the final word. Add anyone else you personally "
+            "consider off-limits here. This is shared with Trade Centre, so it applies everywhere."
+        )
+        roster_players = sorted(
+            players[(players["Team"] == my_team) & (players["Value"] > 0)]["Player"]
+        )
+        st.multiselect(
+            "Players to protect manually",
+            roster_players,
+            key=f"manual_untouchable_players_{my_team}",
+        )
+        team_picks = picks[picks["Current Owner"] == my_team].sort_values("Value", ascending=False)
+        pick_label_map: dict[str, tuple[int, int, str]] = {}
+        for _, row in team_picks.iterrows():
+            label = f'{int(row["Season"])} R{int(row["Round"])}'
+            if row["Traded"]:
+                label += f' (via {row["Original Team"]})'
+            pick_label_map[label] = (int(row["Season"]), int(row["Round"]), str(row["Original Team"]))
+        chosen_pick_labels = st.multiselect(
+            "Picks to protect manually", list(pick_label_map.keys()),
+            key=f"manual_pick_labels_{my_team}",
+        )
+        st.session_state[f"manual_untouchable_picks_{my_team}"] = [
+            pick_label_map[label] for label in chosen_pick_labels
+        ]
+
+    max_offers = st.slider(
+        "Offers to show per side", min_value=1, max_value=10, value=4,
+        help="How many players/picks to surface per side on each card below — not a fixed package "
+        "size, just how many individual options to browse.",
+    )
+
     render_html(
         f'<div class="gm-card"><b>{clean(my_team)}</b> is strongest at '
         f'<b>{clean(" and ".join(my_strengths))}</b> and has the clearest needs at '
@@ -3778,7 +3813,7 @@ def render_team_needs(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.Data
         "value-balanced trade proposal.</div>"
     )
 
-    fits = mutual_fit(teams, players, picks, my_team)
+    fits = mutual_fit(teams, players, picks, my_team, max_offers=max_offers)
     if not fits:
         st.info("No other teams were found to compare against.")
         return
