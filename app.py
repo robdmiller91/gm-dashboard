@@ -3660,289 +3660,6 @@ def build_trade_strategy(
     return {"look_to_trade": look_to_trade, "targets": targets[:top_n]}
 
 
-def render_custom_trade_builder(
-    bundle: dict[str, Any],
-    fc_rows: list[dict[str, Any]],
-    teams: pd.DataFrame,
-    players: pd.DataFrame,
-    picks: pd.DataFrame,
-    team: str,
-    untouchables: set[str],
-) -> None:
-    st.markdown("### Custom Trade Builder")
-    partner = st.selectbox(
-        "Trade partner",
-        [x for x in teams["Team"].tolist() if x != team],
-        key="manual_partner",
-    )
-    untouchable_picks = compute_untouchable_picks(picks)
-    mine = selectable_assets(players, picks, team, untouchables, untouchable_picks)
-    theirs = selectable_assets(players, picks, partner, untouchables, untouchable_picks)
-    devy_pool = devy_asset_pool(2027)
-    rookie_pool = rookie_asset_pool(bundle, fc_rows, players, 2026)
-    mine.update(rookie_pool)
-    mine.update(devy_pool)
-    theirs.update(rookie_pool)
-    theirs.update(devy_pool)
-
-    left, right = st.columns(2)
-    with left:
-        send_labels = st.multiselect(f"{team} sends", list(mine.keys()), key="manual_send")
-    with right:
-        receive_labels = st.multiselect(f"{team} receives", list(theirs.keys()), key="manual_receive")
-    st.caption(
-        "🆕 entries are real 2026 rookies not yet rostered by anyone in this league — live "
-        "Sleeper data and real FantasyCalc value. 🔮 entries are 2027 devy prospects — "
-        "speculative, not yet real NFL players, and not owned by anyone. Both are optional "
-        "add-ons for sketching a 'what if' scenario, not real trade compensation from either side."
-    )
-
-    send_assets = labels_to_assets(send_labels, mine)
-    receive_assets = labels_to_assets(receive_labels, theirs)
-    send_value = package_value(send_assets)
-    receive_value = package_value(receive_assets)
-
-    locked_outgoing_players = [a["label"] for a in send_assets if a["label"] in untouchables]
-    locked_outgoing_picks = [
-        a["label"] for a in send_assets
-        if a["type"] == "pick" and (a.get("season"), a.get("round"), a.get("original_team")) in untouchable_picks
-    ]
-    if locked_outgoing_players:
-        st.warning(
-            f"🔒 {', '.join(locked_outgoing_players)} — flagged as this team's cornerstone at their "
-            "position (clears the value floor, not yet aging out of the role). You can still "
-            "build this trade, "
-            "but it's not one the auto-generated scenarios would ever suggest."
-        )
-    if locked_outgoing_picks:
-        st.warning(
-            f"🔒 {', '.join(locked_outgoing_picks)} — a protected 1st-round pick. Real star-hit "
-            "upside on a 1st doesn't disappear just because a trade balances on paper. You can "
-            "still build this trade, but it's not one the auto-generated scenarios would suggest."
-        )
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("You send", f"{send_value:,}")
-    c2.metric("You receive", f"{receive_value:,}")
-    c3.metric("Difference", f"{receive_value-send_value:+,}")
-
-    pref = st.radio(
-        "Suggestion preference",
-        ["Balanced", "Slightly favourable to my team"],
-        horizontal=True,
-        key="manual_pref",
-    )
-    favourable = pref.startswith("Slightly")
-
-    if not send_assets and not receive_assets:
-        st.info("Select at least one player or pick on either side.")
-        return
-
-    st.markdown("#### Suggested Packages")
-
-    if receive_assets:
-        remaining = max(0, receive_value - send_value)
-        available = [
-            a for k, a in mine.items()
-            if k not in send_labels and a.get("type") not in {"devy", "rookie"}
-        ]
-        suggestions = package_candidates(available, remaining, favourable) if remaining else [[]]
-        for i, extra in enumerate(suggestions[:4], start=1):
-            full_send = send_assets + extra
-            gv, rv = package_value(full_send), receive_value
-            match = max(0, 100 - int(abs(rv-gv)/max(rv, gv, 1)*100))
-            render_html(
-                f'<div class="trade-card"><div class="trade-card-top"><b>Suggested Offer {i}</b>'
-                f'<span class="fit-badge">{match}% value match</span></div>'
-                f'<div class="trade-grid"><div class="trade-side"><div class="trade-side-title">{clean(team)} sends</div>'
-                f'{assets_html(full_send)}<div class="trade-asset"><b>Total</b><b>{gv:,}</b></div></div>'
-                f'<div class="trade-arrow">⇄</div><div class="trade-side"><div class="trade-side-title">{clean(team)} receives</div>'
-                f'{assets_html(receive_assets)}<div class="trade-asset"><b>Total</b><b>{rv:,}</b></div></div></div>'
-                f'<div class="trade-rationale">Value difference in your favour: {rv-gv:+,}.</div></div>'
-            )
-    else:
-        desired = int(send_value * (1.08 if favourable else 1.0))
-        suggestions = package_candidates(list(theirs.values()), desired, False)
-        for i, incoming in enumerate(suggestions[:4], start=1):
-            gv, rv = send_value, package_value(incoming)
-            match = max(0, 100 - int(abs(rv-gv)/max(rv, gv, 1)*100))
-            render_html(
-                f'<div class="trade-card"><div class="trade-card-top"><b>Suggested Return {i}</b>'
-                f'<span class="fit-badge">{match}% value match</span></div>'
-                f'<div class="trade-grid"><div class="trade-side"><div class="trade-side-title">{clean(team)} sends</div>'
-                f'{assets_html(send_assets)}<div class="trade-asset"><b>Total</b><b>{gv:,}</b></div></div>'
-                f'<div class="trade-arrow">⇄</div><div class="trade-side"><div class="trade-side-title">{clean(team)} receives</div>'
-                f'{assets_html(incoming)}<div class="trade-asset"><b>Total</b><b>{rv:,}</b></div></div></div>'
-                f'<div class="trade-rationale">Value difference in your favour: {rv-gv:+,}.</div></div>'
-            )
-
-
-def render_team_needs(teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame) -> None:
-    render_brand("Team Needs", "League-wide positional needs and mutual roster fit")
-
-    render_html('<div class="section-title"><h3>League Needs Board</h3></div>')
-    board = league_needs_board(teams)
-    render_html(
-        '<div class="partner-row"><b>Team</b><b>Rank</b><b>Window</b><b>Strengths</b><b>Needs</b></div>'
-        + "".join(
-            f'<div class="partner-row"><span><b>{clean(r["Team"])}</b></span>'
-            f'<span>#{int(r["Overall Rank"])}</span><span>{clean(r["Window"])}</span>'
-            f'<span>{clean(r["Strengths"])}</span><span>{clean(r["Needs"])}</span></div>'
-            for _, r in board.iterrows()
-        )
-    )
-    st.caption("Strengths/needs are each team's top-2 and bottom-2 ranked positions by total FantasyCalc value.")
-
-    st.markdown("---")
-    st.markdown("### Build Your Offer, Find Trade Fits")
-    st.caption(
-        "Choose what you'd actually give up. We'll find partners whose strengths cover your "
-        "needs and whose needs match your strengths, then suggest a value-balanced return — "
-        "balanced by total value, not by how many pieces are on each side."
-    )
-
-    team_names = teams["Team"].tolist()
-    default_team = find_my_team(team_names) or team_names[0]
-    my_team = st.selectbox(
-        "Analyze from the perspective of",
-        team_names,
-        index=team_names.index(default_team),
-        key="team_needs_my_team",
-    )
-
-    my_profile = positional_profile(teams, my_team)
-    my_strengths = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p])[:2]
-    my_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p], reverse=True)[:2]
-
-    st.markdown("#### Cornerstones")
-    st.caption(
-        "No automatic guessing — you decide who's untouchable. Shared with Trade Centre, so it's "
-        "the same list everywhere."
-    )
-    roster_players = sorted(
-        players[(players["Team"] == my_team) & (players["Value"] > 0)]["Player"]
-    )
-    st.multiselect(
-        "Your cornerstone players (never suggested as a give)",
-        roster_players,
-        key=f"manual_untouchable_players_{my_team}",
-    )
-    team_picks_all = picks[picks["Current Owner"] == my_team].sort_values("Value", ascending=False)
-    pick_label_map: dict[str, tuple[int, int, str]] = {}
-    for _, row in team_picks_all.iterrows():
-        label = f'{int(row["Season"])} R{int(row["Round"])}'
-        if row["Traded"]:
-            label += f' (via {row["Original Team"]})'
-        pick_label_map[label] = (int(row["Season"]), int(row["Round"]), str(row["Original Team"]))
-    chosen_pick_labels = st.multiselect(
-        "Additional picks to protect (1st-rounders are already protected by default)",
-        list(pick_label_map.keys()), key=f"manual_pick_labels_{my_team}",
-    )
-    st.session_state[f"manual_untouchable_picks_{my_team}"] = [
-        pick_label_map[label] for label in chosen_pick_labels
-    ]
-    with st.expander("Override: allow trading a protected 1st-round pick", expanded=False):
-        auto_protected_picks = compute_untouchable_picks(picks)
-        auto_protected_pick_rows = picks[
-            (picks["Current Owner"] == my_team)
-            & picks.apply(
-                lambda r: (int(r["Season"]), int(r["Round"]), str(r["Original Team"])) in auto_protected_picks,
-                axis=1,
-            )
-        ]
-        allow_pick_label_map: dict[str, tuple[int, int, str]] = {}
-        for _, row in auto_protected_pick_rows.iterrows():
-            label = f'{int(row["Season"])} R{int(row["Round"])}'
-            if row["Traded"]:
-                label += f' (via {row["Original Team"]})'
-            allow_pick_label_map[label] = (int(row["Season"]), int(row["Round"]), str(row["Original Team"]))
-        chosen_allow_labels = st.multiselect(
-            "Picks to allow trading (override the default 1st-round protection)",
-            list(allow_pick_label_map.keys()), key=f"manual_allow_pick_labels_{my_team}",
-        )
-        st.session_state[f"manual_allowed_picks_{my_team}"] = [
-            allow_pick_label_map[label] for label in chosen_allow_labels
-        ]
-
-    untouchables, untouchable_picks = compute_effective_cornerstones(picks, my_team)
-
-    st.markdown("#### Players/Picks You'd Give Up")
-    give_pool = build_asset_pool(players, picks, include_teams=[my_team])
-    give_pool = {
-        label: a for label, a in give_pool.items()
-        if a["label"] not in untouchables
-        and (a["type"] != "pick" or (a.get("season"), a.get("round"), a.get("original_team")) not in untouchable_picks)
-    }
-    give_labels = st.multiselect(
-        "Select anything you'd consider moving — any number, any combination",
-        list(give_pool.keys()), key=f"team_needs_give_{my_team}",
-    )
-    give_assets = [give_pool[label] for label in give_labels]
-    give_value = package_value(give_assets)
-
-    if not give_assets:
-        st.info("Select at least one player or pick above to see suggested trade fits.")
-        return
-
-    render_html(
-        f'<div class="gm-card">Giving up {give_value:,} total value: '
-        f'{clean(", ".join(a["label"] for a in give_assets))}</div>'
-    )
-
-    st.markdown("#### Suggested Trade Fits")
-    st.caption(
-        f"Partners ranked by fit — strong at your needs ({clean(' / '.join(my_needs))}), weak where "
-        f"you're strong ({clean(' / '.join(my_strengths))}). Return packages are matched to your "
-        "give value, not a fixed number of pieces."
-    )
-    partners = trade_partner_scores(teams, my_team)
-    shown = 0
-    for _, prow in partners.iterrows():
-        partner = prow["Team"]
-        partner_untouchables, partner_untouchable_picks = compute_effective_cornerstones(picks, partner)
-        partner_profile = positional_profile(teams, partner)
-        their_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: partner_profile[p], reverse=True)[:2]
-
-        candidate_pool = (
-            player_assets(players, partner, my_needs, exclude=partner_untouchables)
-            + pick_assets(picks, partner, exclude=partner_untouchable_picks)
-        )
-        if not candidate_pool:
-            continue
-        return_package = closest_package(candidate_pool, give_value, max_assets=3)
-        if not return_package:
-            continue
-        return_value = package_value(return_package)
-
-        render_html(
-            f'<div class="trade-card">'
-            f'<div class="trade-card-top"><div><b>{clean(partner)}</b>'
-            f'<div class="small-muted">{clean(prow["Window"])}</div></div>'
-            f'<span class="fit-badge">{int(prow["Fit Score"])} fit</span></div>'
-            f'<div class="trade-grid"><div class="trade-side">'
-            f'<div class="trade-side-title">You send ({give_value:,})</div>'
-            f'{assets_html(give_assets)}</div>'
-            f'<div class="trade-arrow">⇄</div>'
-            f'<div class="trade-side"><div class="trade-side-title">You receive ({return_value:,})</div>'
-            f'{assets_html(return_package)}</div></div>'
-            f'<div class="trade-rationale">{clean(partner)} needs {clean("/".join(their_needs))} — '
-            f'right where your offer is strongest — and can pay you back at {clean("/".join(my_needs))}, '
-            f'your actual need.</div>'
-            f'</div>'
-        )
-        shown += 1
-        if shown >= 8:
-            break
-
-    if shown == 0:
-        st.info("No value-matched fits found from your current selection — try adjusting what you're offering.")
-
-    st.caption(
-        "This is a value-matched sketch, not a locked proposal — head to Trade Centre's Custom "
-        "Trade Builder to fine-tune and finalize an actual package."
-    )
-
-
 def render_roster_impact_panel(
     bundle: dict[str, Any], team: str,
     teams: pd.DataFrame, teams_mod: pd.DataFrame,
@@ -4003,6 +3720,237 @@ def render_roster_impact_panel(
             + share_card_html("Value Share", "📈", proj_val_pct, proj_val_rank, "value")
             + '</div>'
         )
+
+
+def render_team_needs(
+    bundle: dict[str, Any], fc_rows: list[dict[str, Any]],
+    teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame,
+) -> None:
+    render_brand(
+        "Team Needs",
+        "League-wide strengths and weaknesses, a roster sandbox, and needs-driven trade concepts",
+    )
+
+    render_html('<div class="section-title"><h3>League Needs Board</h3></div>')
+    board = league_needs_board(teams)
+    render_html(
+        '<div class="partner-row"><b>Team</b><b>Rank</b><b>Window</b><b>Strengths</b><b>Needs</b></div>'
+        + "".join(
+            f'<div class="partner-row"><span><b>{clean(r["Team"])}</b></span>'
+            f'<span>#{int(r["Overall Rank"])}</span><span>{clean(r["Window"])}</span>'
+            f'<span>{clean(r["Strengths"])}</span><span>{clean(r["Needs"])}</span></div>'
+            for _, r in board.iterrows()
+        )
+    )
+    st.caption("Strengths/needs are each team's top-2 and bottom-2 ranked positions by total FantasyCalc value.")
+    st.divider()
+
+    st.markdown("### Roster Sandbox")
+    team_names = teams["Team"].tolist()
+    default_team = find_my_team(team_names) or team_names[0]
+    my_team = st.selectbox(
+        "Your team", team_names, index=team_names.index(default_team), key="needs_my_team"
+    )
+
+    other_teams = [t for t in team_names if t != my_team]
+    partner_choice = st.selectbox(
+        "Trade partner (optional)",
+        ["None — one-sided sandbox"] + other_teams,
+        key="needs_partner",
+        help=(
+            "Leave as None to just see how your own roster would change, and to pick from ANY "
+            "team's players below. Pick a partner to model both sides of a specific deal instead."
+        ),
+    )
+    partner_team = None if partner_choice == "None — one-sided sandbox" else partner_choice
+
+    render_html(
+        '<div class="gm-card">Nothing here is submitted or saved anywhere — this is a sandbox. '
+        "Add any player in the league (yours or anyone else's) to \"acquire,\" pull anyone off "
+        "your own roster to \"give up,\" and see how your positional ranks, overall standing, and "
+        "multi-year value trajectory would shift."
+        + (
+            " With a trade partner selected, both sides of the deal are modeled below."
+            if partner_team else
+            " Giving up an asset just removes it from the pool here; pick a trade partner above "
+            "if you want to see the other side modeled too."
+        )
+        + '</div>'
+    )
+
+    give_pool = build_asset_pool(players, picks, include_teams=[my_team])
+    if partner_team:
+        acquire_pool = build_asset_pool(players, picks, include_teams=[partner_team], show_team_label=True)
+    else:
+        acquire_pool = build_asset_pool(players, picks, exclude_teams=[my_team], show_team_label=True)
+    acquire_pool.update(rookie_asset_pool(bundle, fc_rows, players, 2026))
+    acquire_pool.update(devy_asset_pool(2027))
+
+    c1, c2 = st.columns(2)
+    with c1:
+        give_labels = st.multiselect(
+            "Players/picks you'd give up", list(give_pool.keys()), key="needs_give"
+        )
+    with c2:
+        acquire_labels = st.multiselect(
+            "Players/picks you'd acquire (any team in the league)", list(acquire_pool.keys()), key="needs_acquire"
+        )
+        st.caption(
+            "🆕 entries are real 2026 rookies already drafted by an NFL team but not yet "
+            "rostered by anyone in this league — live Sleeper data and real FantasyCalc value. "
+            "🔮 entries are 2027 devy prospects — not yet real NFL players, not owned by anyone, "
+            "and valued on a much more heavily discounted scale. Adding either is a 'what if' "
+            "sketch, not a real move."
+        )
+
+    if st.button("Reset simulation", key="needs_reset"):
+        st.session_state["needs_give"] = []
+        st.session_state["needs_acquire"] = []
+        st.rerun()
+
+    give_assets = labels_to_assets(give_labels, give_pool)
+    acquire_assets = labels_to_assets(acquire_labels, acquire_pool)
+    has_moves = bool(give_assets or acquire_assets)
+
+    if has_moves:
+        give_value = package_value(give_assets)
+        acquire_value = package_value(acquire_assets)
+        render_html(
+            f'<div class="gm-card">Sending {give_value:,} value, receiving {acquire_value:,} value '
+            f"&mdash; net {acquire_value - give_value:+,}.</div>"
+        )
+
+    players_mod, picks_mod = apply_roster_moves(
+        players, picks, my_team, give_assets, acquire_assets, give_to_team=partner_team
+    )
+    teams_mod = build_teams(players_mod, picks_mod)
+
+    if partner_team:
+        tab1, tab2 = st.tabs([my_team, partner_team])
+        with tab1:
+            render_roster_impact_panel(bundle, my_team, teams, teams_mod, players, players_mod, my_team)
+        with tab2:
+            render_roster_impact_panel(bundle, partner_team, teams, teams_mod, players, players_mod, partner_team)
+    else:
+        render_roster_impact_panel(bundle, my_team, teams, teams_mod, players, players_mod, my_team)
+
+    st.markdown("### Multi-Year Outlook")
+    st.caption(
+        "A simplified dynasty aging curve: RBs decline fastest after their mid-20s, WR/TE erode more "
+        "gradually, QBs hold value longest, and players still climbing toward their positional peak "
+        "age gain value. This is directional planning, not a statistical forecast — real outcomes "
+        "depend on landing spot, injuries, and scheme fit in ways no formula captures."
+    )
+    years = ["Now", "+1 yr", "+2 yrs", "+3 yrs"]
+    chart_df = pd.DataFrame(
+        {
+            "Year": years,
+            "Current Roster": project_roster_trajectory(players, my_team),
+            "Projected Roster": project_roster_trajectory(players_mod, my_team),
+        }
+    ).set_index("Year")
+    st.line_chart(chart_df)
+
+    with st.expander("Projected roster (full list)"):
+        st.dataframe(
+            players_mod[players_mod["Team"] == my_team][
+                ["Player", "Position", "NFL Team", "Age", "Value"]
+            ].sort_values("Value", ascending=False),
+            hide_index=True,
+            use_container_width=True,
+        )
+
+    st.divider()
+    st.markdown("### Suggested Trade Concepts")
+    st.caption(
+        "Cornerstones for this team (set on this page or Roster Lab isn't required — cornerstones "
+        "are purely manual, no automatic guessing). Add cornerstones below, then whatever you've "
+        "selected to give up above feeds directly into needs-driven trade suggestions here."
+    )
+    roster_players = sorted(
+        players[(players["Team"] == my_team) & (players["Value"] > 0)]["Player"]
+    )
+    st.multiselect(
+        "Your cornerstone players (never suggested as a give)",
+        roster_players, key=f"manual_untouchable_players_{my_team}",
+    )
+    team_picks_all = picks[picks["Current Owner"] == my_team].sort_values("Value", ascending=False)
+    pick_label_map: dict[str, tuple[int, int, str]] = {}
+    for _, row in team_picks_all.iterrows():
+        label = f'{int(row["Season"])} R{int(row["Round"])}'
+        if row["Traded"]:
+            label += f' (via {row["Original Team"]})'
+        pick_label_map[label] = (int(row["Season"]), int(row["Round"]), str(row["Original Team"]))
+    chosen_pick_labels = st.multiselect(
+        "Additional picks to protect (1st-rounders are already protected by default)",
+        list(pick_label_map.keys()), key=f"manual_pick_labels_{my_team}",
+    )
+    st.session_state[f"manual_untouchable_picks_{my_team}"] = [
+        pick_label_map[label] for label in chosen_pick_labels
+    ]
+
+    untouchables, untouchable_picks = compute_effective_cornerstones(picks, my_team)
+    concept_give_assets = [
+        a for a in give_assets
+        if a["label"] not in untouchables
+        and (a["type"] != "pick" or (a.get("season"), a.get("round"), a.get("original_team")) not in untouchable_picks)
+    ]
+
+    if not concept_give_assets:
+        st.info("Select at least one non-cornerstone player/pick to give up above to see trade concepts.")
+        return
+
+    concept_give_value = package_value(concept_give_assets)
+    my_profile = positional_profile(teams, my_team)
+    my_strengths = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p])[:2]
+    my_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: my_profile[p], reverse=True)[:2]
+    st.caption(
+        f"Based on {clean(my_team)}'s needs ({clean(' / '.join(my_needs))}) and strengths "
+        f"({clean(' / '.join(my_strengths))}) — partners ranked by reciprocal fit, return packages "
+        "value-matched to what you're giving up, not a fixed number of pieces."
+    )
+
+    partners = trade_partner_scores(teams, my_team)
+    shown = 0
+    for _, prow in partners.iterrows():
+        partner = prow["Team"]
+        partner_untouchables, partner_untouchable_picks = compute_effective_cornerstones(picks, partner)
+        partner_profile = positional_profile(teams, partner)
+        their_needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: partner_profile[p], reverse=True)[:2]
+
+        candidate_pool = (
+            player_assets(players, partner, my_needs, exclude=partner_untouchables)
+            + pick_assets(picks, partner, exclude=partner_untouchable_picks)
+        )
+        if not candidate_pool:
+            continue
+        return_package = closest_package(candidate_pool, concept_give_value, max_assets=3)
+        if not return_package:
+            continue
+        return_value = package_value(return_package)
+
+        render_html(
+            f'<div class="trade-card">'
+            f'<div class="trade-card-top"><div><b>{clean(partner)}</b>'
+            f'<div class="small-muted">{clean(prow["Window"])}</div></div>'
+            f'<span class="fit-badge">{int(prow["Fit Score"])} fit</span></div>'
+            f'<div class="trade-grid"><div class="trade-side">'
+            f'<div class="trade-side-title">You send ({concept_give_value:,})</div>'
+            f'{assets_html(concept_give_assets)}</div>'
+            f'<div class="trade-arrow">⇄</div>'
+            f'<div class="trade-side"><div class="trade-side-title">You receive ({return_value:,})</div>'
+            f'{assets_html(return_package)}</div></div>'
+            f'<div class="trade-rationale">{clean(partner)} needs {clean("/".join(their_needs))} — '
+            f'right where your offer is strongest — and can pay you back at {clean("/".join(my_needs))}, '
+            f'your actual need.</div>'
+            f'</div>'
+        )
+        shown += 1
+        if shown >= 8:
+            break
+
+    if shown == 0:
+        st.info("No value-matched fits found from your current selection — try adjusting what you're offering.")
 
 
 def render_roster_lab(
@@ -4129,490 +4077,6 @@ def render_roster_lab(
             hide_index=True,
             use_container_width=True,
         )
-
-
-def render_trade_intelligence(
-    bundle: dict[str, Any],
-    fc_rows: list[dict[str, Any]],
-    teams: pd.DataFrame,
-    players: pd.DataFrame,
-    picks: pd.DataFrame,
-) -> None:
-    render_brand("Trade Intelligence", "Roster-aware partners and trade scenarios")
-
-    team_names = teams["Team"].tolist()
-    default_team = find_my_team(team_names) or team_names[0]
-    team = st.selectbox(
-        "Analyze franchise",
-        team_names,
-        index=team_names.index(default_team),
-    )
-
-    profile = positional_profile(teams, team)
-    strengths = sorted(["QB", "RB", "WR", "TE"], key=lambda p: profile[p])[:2]
-    needs = sorted(["QB", "RB", "WR", "TE"], key=lambda p: profile[p], reverse=True)[:2]
-
-    st.markdown("#### Cornerstones")
-    st.caption(
-        "No automatic guessing here — you decide who's actually untouchable. The algorithm doesn't "
-        "know you'd rather keep LaPorta over Loveland even if Loveland grades out higher; only you "
-        "do. This list is shared with Team Needs, so it's the same everywhere."
-    )
-    roster_players = sorted(
-        players[(players["Team"] == team) & (players["Value"] > 0)]["Player"]
-    )
-    st.multiselect(
-        "Your cornerstone players (never suggested in auto-generated trades)",
-        roster_players,
-        key=f"manual_untouchable_players_{team}",
-    )
-    team_picks = picks[picks["Current Owner"] == team].sort_values("Value", ascending=False)
-    pick_label_map: dict[str, tuple[int, int, str]] = {}
-    for _, row in team_picks.iterrows():
-        label = f'{int(row["Season"])} R{int(row["Round"])}'
-        if row["Traded"]:
-            label += f' (via {row["Original Team"]})'
-        pick_label_map[label] = (int(row["Season"]), int(row["Round"]), str(row["Original Team"]))
-    chosen_pick_labels = st.multiselect(
-        "Additional picks to protect (1st-rounders are already protected by default)",
-        list(pick_label_map.keys()), key=f"manual_pick_labels_{team}"
-    )
-    st.session_state[f"manual_untouchable_picks_{team}"] = [
-        pick_label_map[label] for label in chosen_pick_labels
-    ]
-
-    untouchable_picks_auto = compute_untouchable_picks(picks)
-    with st.expander("Override: allow trading a protected 1st-round pick", expanded=False):
-        st.caption(
-            "1st-round picks are protected by default. If you're actually willing to move one — "
-            "same idea as overriding a cornerstone player — allow it here."
-        )
-        auto_protected_pick_rows = picks[
-            (picks["Current Owner"] == team)
-            & picks.apply(
-                lambda r: (int(r["Season"]), int(r["Round"]), str(r["Original Team"])) in untouchable_picks_auto,
-                axis=1,
-            )
-        ]
-        allow_pick_label_map: dict[str, tuple[int, int, str]] = {}
-        for _, row in auto_protected_pick_rows.iterrows():
-            label = f'{int(row["Season"])} R{int(row["Round"])}'
-            if row["Traded"]:
-                label += f' (via {row["Original Team"]})'
-            allow_pick_label_map[label] = (int(row["Season"]), int(row["Round"]), str(row["Original Team"]))
-        chosen_allow_labels = st.multiselect(
-            "Picks to allow trading (override the default 1st-round protection)",
-            list(allow_pick_label_map.keys()), key=f"manual_allow_pick_labels_{team}",
-        )
-        st.session_state[f"manual_allowed_picks_{team}"] = [
-            allow_pick_label_map[label] for label in chosen_allow_labels
-        ]
-
-    untouchables, untouchable_picks = compute_effective_cornerstones(picks, team)
-
-    my_untouchables = sorted(
-        players[(players["Team"] == team) & (players["Player"].isin(untouchables))]["Player"]
-    )
-    my_protected_picks = sorted(
-        f'{int(row["Season"])} R{int(row["Round"])}'
-        for _, row in picks[picks["Current Owner"] == team].iterrows()
-        if (int(row["Season"]), int(row["Round"]), str(row["Original Team"])) in untouchable_picks
-    )
-
-    render_html(
-        f'<div class="gm-card"><b>{clean(team)}</b> is strongest at '
-        f'<b>{clean(" and ".join(strengths))}</b> and has the clearest needs at '
-        f'<b>{clean(" and ".join(needs))}</b>. Partner fit uses positional rankings, '
-        'competitive window and owned draft capital.'
-        + (
-            f'<br><b>🔒 Untouchable:</b> {clean(", ".join(my_untouchables))} — excluded from '
-            "auto-generated scenarios below, but still selectable in the custom builder."
-            if my_untouchables else
-            f"<br>No cornerstones set for {clean(team)} yet — add some above."
-        )
-        + (
-            f'<br><b>🔒 Protected picks:</b> {clean(", ".join(my_protected_picks))} — 1st-round '
-            "picks stay off auto-generated scenarios regardless of value; 2nd-round+ picks are "
-            "treated as real, tradeable capital."
-            if my_protected_picks else ""
-        )
-        + '</div>'
-    )
-
-    render_custom_trade_builder(bundle, fc_rows, teams, players, picks, team, untouchables)
-
-    st.markdown("---")
-    st.markdown("### Recommended Trade Partners")
-
-    partners = trade_partner_scores(teams, team)
-
-    render_html(
-        '<div class="partner-row"><b>Partner</b><b>Fit</b><b>Window</b>'
-        '<b>Picks</b><b>Needs / Strengths</b></div>'
-        + "".join(
-            f'<div class="partner-row"><span><b>{clean(r["Team"])}</b></span>'
-            f'<span>{int(r["Fit Score"])}</span><span>{clean(r["Window"])}</span>'
-            f'<span>#{int(r["Pick Rank"])}</span>'
-            f'<span>{clean(r["Needs"])} / {clean(r["Strengths"])}</span></div>'
-            for _, r in partners.head(8).iterrows()
-        )
-    )
-
-    # Keep the ranked partner table as the recommendation layer, but allow
-    # scenarios to be generated against every other franchise in the league.
-    all_partner_options = [
-        candidate
-        for candidate in teams["Team"].tolist()
-        if candidate != team
-    ]
-    recommended_order = partners["Team"].tolist()
-    ordered_partner_options = recommended_order + [
-        candidate
-        for candidate in all_partner_options
-        if candidate not in recommended_order
-    ]
-
-    partner = st.selectbox(
-        "Generate scenarios with any team",
-        ordered_partner_options,
-        help=(
-            "Teams are ordered by roster and draft-capital fit, but every "
-            "other franchise is available."
-        ),
-    )
-
-    st.markdown("### Simple Trade Ideas")
-    st.caption(
-        f"Straightforward one-for-one swaps between {team} and {partner} — no multi-piece "
-        "packages, just close value matches. Untouchable players are excluded."
-    )
-    simple_ideas = build_simple_trades(players, picks, team, partner, untouchables)
-    if not simple_ideas:
-        st.info("No close one-for-one matches were found between these two rosters.")
-    for idea in simple_ideas:
-        gv = idea["give"][0]["value"]
-        rv = idea["receive"][0]["value"]
-        render_html(
-            f'<div class="trade-card"><div class="trade-card-top"><b>Simple swap</b>'
-            f'<span class="fit-badge">{idea["match"]}% value match</span></div>'
-            f'<div class="trade-grid"><div class="trade-side">'
-            f'<div class="trade-side-title">{clean(team)} sends</div>'
-            f'{assets_html(idea["give"])}</div>'
-            f'<div class="trade-arrow">⇄</div>'
-            f'<div class="trade-side"><div class="trade-side-title">{clean(team)} receives</div>'
-            f'{assets_html(idea["receive"])}</div></div>'
-            f'<div class="trade-rationale">Value difference in your favour: {rv - gv:+,}.</div></div>'
-        )
-
-    st.markdown("### Suggested Trade Scenarios")
-    st.caption("Multi-piece, need-based packages built around each team's positional gaps.")
-
-    scenarios = build_trade_scenarios(teams, players, picks, team, partner, untouchables)
-    if not scenarios:
-        st.info("No reasonable scenarios were generated from the current values.")
-        return
-
-    for scenario in scenarios:
-        give_value = sum(a["value"] for a in scenario["give"])
-        receive_value = sum(a["value"] for a in scenario["receive"])
-        match = max(
-            0,
-            100 - int(abs(receive_value - give_value) / max(give_value, receive_value, 1) * 100),
-        )
-
-        render_html(
-            f'<div class="trade-card">'
-            f'<div class="trade-card-top"><div><b>{clean(scenario["title"])}</b>'
-            f'<div class="small-muted">{clean(partner)}</div></div>'
-            f'<span class="fit-badge">{match}% value match</span></div>'
-            f'<div class="trade-grid"><div class="trade-side">'
-            f'<div class="trade-side-title">{clean(team)} sends</div>'
-            f'{assets_html(scenario["give"])}'
-            f'<div class="trade-asset"><b>Total</b><b>{give_value:,}</b></div></div>'
-            f'<div class="trade-arrow">⇄</div>'
-            f'<div class="trade-side"><div class="trade-side-title">{clean(team)} receives</div>'
-            f'{assets_html(scenario["receive"])}'
-            f'<div class="trade-asset"><b>Total</b><b>{receive_value:,}</b></div></div></div>'
-            f'<div class="trade-rationale">{clean(scenario["rationale"])}</div></div>'
-        )
-
-    st.caption(
-        "These are heuristic starting points, not predictions of acceptance. "
-        "They use FantasyCalc values, positional rankings, team windows and Sleeper pick ownership."
-    )
-
-
-def render_trade_calculator(players: pd.DataFrame, picks: pd.DataFrame, teams: pd.DataFrame) -> None:
-    render_brand("Trade Centre", "Build and compare trade packages")
-    st.caption("Rough-draft calculator using FantasyCalc player values and estimated draft-pick values.")
-
-    player_options = {
-        f'{row["Player"]} — {row["Team"]} ({int(row["Value"]):,})': int(row["Value"])
-        for _, row in players.sort_values("Value", ascending=False).iterrows()
-    }
-    pick_options = {
-        f'{int(row["Season"])} R{int(row["Round"])} — {row["Current Owner"]} ({int(row["Value"]):,})': int(row["Value"])
-        for _, row in picks.iterrows()
-    }
-    all_options = {**player_options, **pick_options}
-
-    left, right = st.columns(2, gap="large")
-    with left:
-        render_html("### They Receive")
-        give = st.multiselect("Add assets", list(all_options.keys()), key="give")
-        give_value = sum(all_options[x] for x in give)
-        st.metric("Package Value", f"{give_value:,}")
-    with right:
-        render_html("### I Receive")
-        receive = st.multiselect("Add assets", list(all_options.keys()), key="receive")
-        receive_value = sum(all_options[x] for x in receive)
-        st.metric("Package Value", f"{receive_value:,}")
-
-    difference = receive_value - give_value
-    if give or receive:
-        if abs(difference) <= max(500, int((give_value + receive_value) * .05)):
-            st.success(f"Approximately balanced. Difference: {difference:+,}")
-        elif difference > 0:
-            st.info(f"Your side receives about {difference:,} more value.")
-        else:
-            st.warning(f"Your side gives about {abs(difference):,} more value.")
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_draft_history(league_id: str) -> list[dict[str, Any]]:
-    """Walk the league's previous_league_id chain, collecting each season's users/rosters/drafts.
-
-    Sleeper represents each season as its own league object, linked backward
-    via previous_league_id. There's no single endpoint for "all history," so
-    this walks the chain until it runs out (or hits a cycle/missing league).
-    """
-    history: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    current_id: str | None = league_id
-
-    while current_id and str(current_id) not in seen_ids and str(current_id) != "0":
-        seen_ids.add(str(current_id))
-        try:
-            league_obj = get_json(f"{SLEEPER_BASE}/league/{current_id}")
-        except DataError:
-            break
-        if not isinstance(league_obj, dict):
-            break
-
-        try:
-            users = get_json(f"{SLEEPER_BASE}/league/{current_id}/users")
-        except DataError:
-            users = []
-        try:
-            rosters = get_json(f"{SLEEPER_BASE}/league/{current_id}/rosters")
-        except DataError:
-            rosters = []
-        try:
-            drafts = get_json(f"{SLEEPER_BASE}/league/{current_id}/drafts")
-        except DataError:
-            drafts = []
-
-        history.append(
-            {
-                "season": league_obj.get("season"),
-                "league_id": str(current_id),
-                "users": users if isinstance(users, list) else [],
-                "rosters": rosters if isinstance(rosters, list) else [],
-                "drafts": drafts if isinstance(drafts, list) else [],
-            }
-        )
-        current_id = league_obj.get("previous_league_id")
-
-    return history
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def load_transactions(league_id: str, week: int) -> list[dict[str, Any]]:
-    try:
-        return get_json(f"{SLEEPER_BASE}/league/{league_id}/transactions/{week}")
-    except DataError:
-        return []
-
-
-def load_all_trades(bundle: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every completed trade across this league's full history, walking the same
-    previous_league_id chain as Draft History, normalized into simple records.
-
-    Sleeper team display names are just editable text — the same manager can
-    show up under a different team name in different seasons. Everything here
-    is tracked by Sleeper's stable user_id underneath, with the historical team
-    name attached only for display, so filtering by "team" actually follows the
-    person across name changes instead of silently fragmenting their history.
-    """
-    league_id = str(bundle["league"].get("league_id") or LEAGUE_ID)
-    history = load_draft_history(league_id)
-    if not history:
-        history = [
-            {
-                "season": bundle["league"].get("season"), "league_id": league_id,
-                "users": bundle["users"], "rosters": bundle["rosters"],
-            }
-        ]
-
-    player_meta = bundle["players"]
-    trades = []
-    for entry in history:
-        season = entry.get("season")
-        season_league_id = entry.get("league_id")
-        if not season_league_id:
-            continue
-        users_map = {str(u.get("user_id")): team_name(u) for u in entry.get("users") or []}
-        roster_to_uid = {
-            int(r["roster_id"]): str(r.get("owner_id"))
-            for r in entry.get("rosters") or []
-        }
-
-        def team_at_time(rid: int | None) -> tuple[str, str]:
-            """Returns (user_id, team name as it was that season)."""
-            if rid is None:
-                return "", "Unknown"
-            uid = roster_to_uid.get(int(rid), "")
-            return uid, users_map.get(uid, f"Roster {rid}")
-
-        for week in range(1, 19):
-            for tx in load_transactions(season_league_id, week):
-                if tx.get("type") != "trade" or tx.get("status") != "complete":
-                    continue
-
-                roster_ids = tx.get("roster_ids") or []
-                uids_involved = sorted({team_at_time(rid)[0] for rid in roster_ids if team_at_time(rid)[0]})
-
-                adds = tx.get("adds") or {}
-                drops = tx.get("drops") or {}
-                players_moved = []
-                for pid, to_rid in adds.items():
-                    from_rid = drops.get(pid)
-                    meta = player_meta.get(str(pid), {}) or {}
-                    name = (
-                        meta.get("full_name")
-                        or " ".join(filter(None, [meta.get("first_name"), meta.get("last_name")]))
-                        or str(pid)
-                    )
-                    to_uid, to_name = team_at_time(to_rid)
-                    from_uid, from_name = team_at_time(from_rid)
-                    players_moved.append(
-                        {
-                            "player": name, "position": meta.get("position") or "",
-                            "to_uid": to_uid, "to_team": to_name,
-                            "from_uid": from_uid, "from_team": from_name,
-                            "image": player_image_url({"player_id": pid}),
-                        }
-                    )
-
-                picks_moved = []
-                for p in tx.get("draft_picks") or []:
-                    to_uid, to_name = team_at_time(p.get("owner_id"))
-                    from_uid, from_name = team_at_time(p.get("previous_owner_id"))
-                    picks_moved.append(
-                        {
-                            "season": p.get("season"), "round": p.get("round"),
-                            "to_uid": to_uid, "to_team": to_name,
-                            "from_uid": from_uid, "from_team": from_name,
-                        }
-                    )
-
-                if not players_moved and not picks_moved:
-                    continue
-
-                trades.append(
-                    {
-                        "season": season, "week": week, "user_ids": uids_involved,
-                        "players_moved": players_moved, "picks_moved": picks_moved,
-                        "timestamp": tx.get("created") or 0,
-                        "transaction_id": tx.get("transaction_id"),
-                    }
-                )
-
-    trades.sort(key=lambda t: t["timestamp"], reverse=True)
-    return trades
-
-
-def build_draft_board(season_entry: dict[str, Any]) -> pd.DataFrame:
-    """Actual draft results for one season, one row per pick, ready for a grid view."""
-    drafts = season_entry.get("drafts") or []
-    draft = next((d for d in drafts if (d.get("type") or "").lower() != "auction"), None)
-    if draft is None and drafts:
-        draft = drafts[0]
-    if not draft or not draft.get("draft_id"):
-        return pd.DataFrame()
-
-    try:
-        picks_raw = get_json(f"{SLEEPER_BASE}/draft/{draft['draft_id']}/picks")
-    except DataError:
-        return pd.DataFrame()
-    if not picks_raw:
-        return pd.DataFrame()
-
-    users_map = {str(u.get("user_id")): team_name(u) for u in season_entry.get("users") or []}
-    roster_owner = {
-        int(r["roster_id"]): users_map.get(str(r.get("owner_id")), f"Roster {r['roster_id']}")
-        for r in season_entry.get("rosters") or []
-    }
-    slot_to_roster = {
-        int(k): int(v) for k, v in (draft.get("slot_to_roster_id") or {}).items() if v
-    }
-    # Fallback source for original-slot ownership: slot_to_roster_id isn't
-    # guaranteed to be populated on every league/season, but draft_order
-    # (user_id -> 1-indexed slot) usually is, so use it if the primary
-    # source comes up empty.
-    slot_to_team_fallback: dict[int, str] = {}
-    for uid, slot_no in (draft.get("draft_order") or {}).items():
-        try:
-            slot_to_team_fallback[int(slot_no)] = users_map.get(str(uid), str(uid))
-        except (TypeError, ValueError):
-            continue
-
-    # Last resort: if neither slot_to_roster_id nor draft_order is populated
-    # for this season, assume whoever picked in round 1 for a given slot is
-    # that slot's original owner. Imperfect if round 1 itself was traded,
-    # but still better than treating every pick as untraded.
-    if not slot_to_roster and not slot_to_team_fallback:
-        for p in picks_raw:
-            if int(p.get("round") or 0) != 1:
-                continue
-            s = int(p.get("draft_slot") or 0)
-            rid = p.get("roster_id")
-            if rid is not None:
-                slot_to_team_fallback[s] = roster_owner.get(int(rid), f"Roster {rid}")
-
-    rows = []
-    for p in picks_raw:
-        meta = p.get("metadata") or {}
-        slot = int(p.get("draft_slot") or 0)
-        roster_id = p.get("roster_id")
-        picked_team = roster_owner.get(int(roster_id), f"Roster {roster_id}") if roster_id else "Unknown"
-
-        original_roster = slot_to_roster.get(slot)
-        original_team = roster_owner.get(original_roster) if original_roster else None
-        if not original_team:
-            original_team = slot_to_team_fallback.get(slot)
-        original_team = original_team or picked_team
-        traded = original_team != picked_team
-
-        name = f"{meta.get('first_name', '')} {meta.get('last_name', '')}".strip()
-        sleeper_id = p.get("player_id")
-        rows.append(
-            {
-                "Round": int(p.get("round") or 0),
-                "Slot": slot,
-                "Pick No": int(p.get("pick_no") or 0),
-                "Team": picked_team,
-                "Original Team": original_team,
-                "Traded": traded,
-                "Player": name or meta.get("player_id", "Unknown"),
-                "Position": meta.get("position") or "",
-                "NFL Team": meta.get("team") or "FA",
-                "Is Keeper": bool(p.get("is_keeper")),
-                "Sleeper ID": str(sleeper_id) if sleeper_id else "",
-                "Image": player_image_url({"player_id": sleeper_id}),
-            }
-        )
-    return pd.DataFrame(rows)
 
 
 def render_draft(picks: pd.DataFrame, teams: pd.DataFrame) -> None:
@@ -6087,7 +5551,7 @@ def main() -> None:
     st.sidebar.markdown("## 🏈 Front Office")
     page = st.sidebar.radio(
         "Navigation",
-        ["My Team", "Team Blueprint", "League", "League Projections", "League Analyzer", "Rankings", "Team Needs", "Trade Centre", "Roster Lab", "Draft Capital", "Draft History", "Trade History", "Mock Draft"],
+        ["My Team", "Team Blueprint", "League", "League Projections", "League Analyzer", "Rankings", "Team Needs", "Roster Lab", "Draft Capital", "Draft History", "Trade History", "Mock Draft"],
         label_visibility="collapsed",
     )
     st.sidebar.markdown("---")
@@ -6122,9 +5586,7 @@ def main() -> None:
     elif page == "Rankings":
         render_rankings(players)
     elif page == "Team Needs":
-        render_team_needs(teams, players, picks)
-    elif page == "Trade Centre":
-        render_trade_intelligence(bundle, fc_rows, teams, players, picks)
+        render_team_needs(bundle, fc_rows, teams, players, picks)
     elif page == "Roster Lab":
         render_roster_lab(bundle, fc_rows, teams, players, picks)
     elif page == "Draft Capital":
