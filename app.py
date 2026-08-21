@@ -1039,12 +1039,12 @@ class DataError(RuntimeError):
     pass
 
 
-def get_json(url: str, timeout: int = 30) -> Any:
+def get_json(url: str, timeout: int = 30, headers: dict[str, str] | None = None) -> Any:
     try:
         response = requests.get(
             url,
             timeout=timeout,
-            headers={"User-Agent": "Fantasy-Football-Front-Office/Milestone-2"},
+            headers={"User-Agent": "Fantasy-Football-Front-Office/Milestone-2", **(headers or {})},
         )
         response.raise_for_status()
         return response.json()
@@ -1083,6 +1083,119 @@ def team_name(user: dict[str, Any]) -> str:
     )
 
 
+try:
+    FANTASYPROS_API_KEY = st.secrets.get("fantasypros_api_key", "")
+except Exception:
+    FANTASYPROS_API_KEY = ""
+
+
+def normalize_player_name(name: str) -> str:
+    """Lowercase, strip punctuation and Jr./Sr./II-IV suffixes — used to match
+    FantasyPros player names against Sleeper's player library, since
+    FantasyPros doesn't expose Sleeper IDs directly the way FantasyCalc does.
+    This is inherently fuzzier than ID-based matching and will miss some
+    players (name formatting differences, duplicate names, etc.).
+    """
+    name = (name or "").lower()
+    name = re.sub(r"[^\w\s]", "", name)
+    name = re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", "", name)
+    return " ".join(name.split())
+
+
+def build_sleeper_name_lookup(sleeper_players: dict[str, Any]) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for pid, meta in sleeper_players.items():
+        full_name = meta.get("full_name") or " ".join(
+            filter(None, [meta.get("first_name"), meta.get("last_name")])
+        )
+        if not full_name:
+            continue
+        lookup[normalize_player_name(full_name)] = pid
+    return lookup
+
+
+def fantasypros_rank_to_value(rank: int, max_value: int = 10000, decay: float = 0.028) -> int:
+    """Convert a FantasyPros consensus rank into a rough dynasty-style point
+    value. This is OUR OWN approximation, not FantasyPros' own valuation —
+    they publish ranks, not dollar/point values, so this is a necessary
+    reimplementation, not a faithful reproduction of any 'real' FantasyPros
+    number. Calibrated loosely to sit in a similar range to FantasyCalc's
+    scale so trade math elsewhere in the app stays sensible, but the actual
+    curve shape (how much rank 1 beats rank 2, etc.) is an approximation.
+    """
+    return max(1, round(max_value * math.exp(-decay * max(rank - 1, 0))))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_fantasypros_dynasty_rankings(season: int) -> tuple[list[dict[str, Any]], bool, str]:
+    """Raw FantasyPros consensus rankings, requested as Dynasty type.
+
+    Returns (players, confirmed_dynasty, error_message). confirmed_dynasty is
+    True only if the API actually echoes back type=Dynasty in its response —
+    sources disagree on whether dynasty rankings are really exposed by this
+    endpoint, so this is verified against the live response rather than
+    assumed to work.
+    """
+    if not FANTASYPROS_API_KEY:
+        return [], False, "No FantasyPros API key found in st.secrets['fantasypros_api_key']."
+    season = season or 2026
+    url = f"https://api.fantasypros.com/public/v2/json/nfl/{season}/consensus-rankings"
+    try:
+        data = get_json(
+            url, headers={"x-api-key": FANTASYPROS_API_KEY},
+        )
+    except DataError as exc:
+        return [], False, str(exc)
+    if not isinstance(data, dict):
+        return [], False, "Unexpected response shape from FantasyPros."
+    confirmed_dynasty = str(data.get("type", "")).lower() == "dynasty"
+    return data.get("players") or [], confirmed_dynasty, ""
+
+
+def build_fantasypros_rows(sleeper_players: dict[str, Any], season: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Produces rows in the SAME shape as normalise_fc's output (sleeper_id,
+    value, rank, position_rank, trend, age) so it can be swapped in for
+    FantasyCalc with no changes needed elsewhere. Trend is always 0 —
+    FantasyPros' consensus-rankings endpoint doesn't expose 30-day value
+    movement the way FantasyCalc does, so the 30-Day Trend feature won't have
+    real data to show when this source is selected.
+    """
+    raw_players, confirmed_dynasty, error = load_fantasypros_dynasty_rankings(season)
+    stats = {
+        "confirmed_dynasty": confirmed_dynasty, "error": error,
+        "total_fetched": len(raw_players), "matched": 0,
+    }
+    if not raw_players:
+        return [], stats
+
+    name_lookup = build_sleeper_name_lookup(sleeper_players)
+    rows: list[dict[str, Any]] = []
+    for p in raw_players:
+        name = p.get("player_name") or ""
+        pid = name_lookup.get(normalize_player_name(name))
+        if not pid:
+            continue
+        rank = p.get("rank_ecr") or p.get("rank_ave") or p.get("rank")
+        if rank is None:
+            continue
+        try:
+            rank = float(rank)
+        except (TypeError, ValueError):
+            continue
+        rows.append(
+            {
+                "sleeper_id": str(pid),
+                "value": fantasypros_rank_to_value(rank),
+                "rank": rank,
+                "position_rank": p.get("pos_rank") or p.get("rank_pos"),
+                "trend": 0,
+                "age": None,
+            }
+        )
+    stats["matched"] = len(rows)
+    return rows, stats
+
+
 def normalise_fc(row: dict[str, Any]) -> dict[str, Any]:
     player = row.get("player") or {}
     sleeper_id = (
@@ -1114,11 +1227,7 @@ def player_image_url(player: dict[str, Any]) -> str:
 
 def build_players(bundle: dict[str, Any], fc_rows: list[dict[str, Any]]) -> pd.DataFrame:
     users = {str(u.get("user_id")): u for u in bundle["users"]}
-    fc_by_id = {
-        row["sleeper_id"]: row
-        for row in (normalise_fc(x) for x in fc_rows)
-        if row["sleeper_id"]
-    }
+    fc_by_id = {row["sleeper_id"]: row for row in fc_rows if row.get("sleeper_id")}
 
     rows: list[dict[str, Any]] = []
     for roster in bundle["rosters"]:
@@ -4647,11 +4756,7 @@ def build_rookies(
     correctly come back thin-to-empty until that class actually exists as
     real NFL players.
     """
-    fc_by_id = {
-        row["sleeper_id"]: row
-        for row in (normalise_fc(x) for x in fc_rows)
-        if row["sleeper_id"]
-    }
+    fc_by_id = {row["sleeper_id"]: row for row in fc_rows if row.get("sleeper_id")}
 
     rows: list[dict[str, Any]] = []
     for pid, p in bundle["players"].items():
@@ -5938,10 +6043,40 @@ def main() -> None:
         st.cache_data.clear()
         st.rerun()
 
+    value_source_label = st.sidebar.selectbox(
+        "Dynasty value source",
+        ["FantasyCalc", "FantasyPros (beta)"],
+        help=(
+            "FantasyCalc: direct dollar-style dynasty values, ID-matched to Sleeper exactly. "
+            "FantasyPros (beta): our own rank-to-value conversion from FantasyPros' consensus "
+            "rankings, name-matched to Sleeper (less exact) — no 30-day trend data available "
+            "from this source."
+        ),
+    )
+    value_source = "fantasypros" if "FantasyPros" in value_source_label else "fantasycalc"
+
     try:
-        with st.spinner("Loading Sleeper and FantasyCalc data..."):
+        with st.spinner("Loading Sleeper and dynasty value data..."):
             bundle = load_sleeper_bundle(LEAGUE_ID)
-            fc_rows = load_fantasycalc()
+            if value_source == "fantasypros":
+                sleeper_season = int((bundle.get("league") or {}).get("season") or 2026)
+                fc_rows, fp_stats = build_fantasypros_rows(bundle["players"], sleeper_season)
+                if fp_stats.get("error"):
+                    st.sidebar.error(f"FantasyPros: {fp_stats['error']}")
+                elif not fp_stats.get("confirmed_dynasty"):
+                    st.sidebar.warning(
+                        "FantasyPros didn't confirm these are Dynasty rankings — the API may not "
+                        "actually expose that type. Treat values with extra caution."
+                    )
+                if fp_stats.get("total_fetched"):
+                    match_pct = round(fp_stats["matched"] / fp_stats["total_fetched"] * 100)
+                    st.sidebar.caption(
+                        f"FantasyPros: matched {fp_stats['matched']}/{fp_stats['total_fetched']} "
+                        f"players to Sleeper by name ({match_pct}%)."
+                    )
+            else:
+                raw_fc_rows = load_fantasycalc()
+                fc_rows = [normalise_fc(x) for x in raw_fc_rows]
             players = build_players(bundle, fc_rows)
             picks = build_picks(bundle)
             teams = build_teams(players, picks)
