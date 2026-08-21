@@ -252,6 +252,8 @@ st.markdown(
       font-size:.79rem;
     }
     .position-row:last-child { border-radius:0 0 10px 10px; }
+    .trend-up { color:#3ddc84; font-weight:800; }
+    .trend-down { color:#ff6b6b; font-weight:800; }
     .mini-photo {
       width:28px; height:28px; border-radius:50%;
       object-fit:cover; background:#111827;
@@ -262,6 +264,7 @@ st.markdown(
       text-overflow:ellipsis;
     }
     .value { color:#d7dce3; font-variant-numeric:tabular-nums; }
+    .small-muted { color:var(--muted); font-size:.72rem; font-weight:600; }
     .small-rank {
       min-width:30px;
       text-align:center;
@@ -2247,6 +2250,43 @@ def render_league_projections(bundle: dict[str, Any], teams: pd.DataFrame, playe
     )
 
 
+def render_trend_breakdown(roster: pd.DataFrame) -> None:
+    """Per-player 30-day value movement, sorted by magnitude — exactly which
+    players are driving the team's overall 30-Day Trend stat, and by how much.
+    """
+    trend_df = roster[(roster["Value"] > 0) & (roster["Trend"] != 0)][
+        ["Player", "Position", "Image", "Value", "Trend"]
+    ].copy()
+    if trend_df.empty:
+        st.caption("No recent value movement recorded for this roster.")
+        return
+    trend_df = trend_df.sort_values("Trend", key=lambda s: s.abs(), ascending=False)
+
+    risers = trend_df[trend_df["Trend"] > 0]
+    fallers = trend_df[trend_df["Trend"] < 0]
+    net = int(trend_df["Trend"].sum())
+    st.caption(
+        f"{len(risers)} riser(s) totaling {int(risers['Trend'].sum()):+,}, "
+        f"{len(fallers)} faller(s) totaling {int(fallers['Trend'].sum()):+,} — "
+        f"net {net:+,}, matching the 30-Day Trend stat above."
+    )
+    for _, r in trend_df.iterrows():
+        is_up = r["Trend"] > 0
+        arrow_class = "trend-up" if is_up else "trend-down"
+        arrow = "▲" if is_up else "▼"
+        render_html(
+            f"""
+            <div class="position-row">
+              <img class="mini-photo" src="{clean(r["Image"])}"
+                   onerror="this.onerror=null;this.src='https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png';">
+              <span class="name-clip">{clean(r["Player"])} <span class="small-muted">{clean(r["Position"])}</span></span>
+              <span class="value">{int(r["Value"]):,}</span>
+              <span class="{arrow_class}">{arrow} {int(r["Trend"]):+,}</span>
+            </div>
+            """
+        )
+
+
 def render_team_review(
     bundle: dict[str, Any], teams: pd.DataFrame, players: pd.DataFrame, picks: pd.DataFrame, league_name: str
 ) -> None:
@@ -2270,6 +2310,9 @@ def render_team_review(
     )
 
     render_summary_cards(row)
+
+    with st.expander("Where is the 30-Day Trend coming from?", expanded=False):
+        render_trend_breakdown(roster)
 
     render_weekly_dashboard(bundle, teams, players, selected)
 
