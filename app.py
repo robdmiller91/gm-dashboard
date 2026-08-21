@@ -1822,6 +1822,7 @@ def render_summary_cards(row: pd.Series) -> None:
         ("Overall Rank", f'#{int(row["Overall_Rank"])}', "League-wide franchise rank"),
         ("Player Value", f'{int(row["Player_Value"]):,}', "Current roster market value"),
         ("Pick Value", f'{int(row["Pick_Value"]):,}', "Future draft capital"),
+        ("Total Team Value", f'{int(row["Total_Value"]):,}', "Player value + pick value combined"),
         ("Average Age", f'{row["Avg_Age"]:.1f}', "Roster age profile"),
         ("30-Day Trend", f'{int(row["Trend"]):+d}', "Recent market movement"),
     ]
