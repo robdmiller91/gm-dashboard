@@ -5600,6 +5600,326 @@ def simulate_full_league(
     return pd.DataFrame(rows).sort_values("Champion Odds", ascending=False).reset_index(drop=True)
 
 
+def build_regular_season_results(
+    league_id: str, roster_to_team: dict[int, str], weeks: list[int]
+) -> dict[int, list[tuple[str, float, str, float]]]:
+    """Every head-to-head pairing per week as (team_a, pts_a, team_b, pts_b).
+    Points are 0 for weeks not yet played; the caller decides which weeks count
+    as completed."""
+    out: dict[int, list[tuple[str, float, str, float]]] = {}
+    for wk in weeks:
+        pairs: dict[Any, list[tuple[str, float]]] = {}
+        for m in load_matchups(league_id, wk):
+            mid, rid = m.get("matchup_id"), m.get("roster_id")
+            if mid is None or rid is None:
+                continue
+            pairs.setdefault(mid, []).append(
+                (roster_to_team.get(int(rid), f"Roster {rid}"), float(m.get("points") or 0))
+            )
+        out[wk] = [(v[0][0], v[0][1], v[1][0], v[1][1]) for v in pairs.values() if len(v) == 2]
+    return out
+
+
+def simulate_draft_order(
+    all_teams: list[str],
+    results: dict[int, list[tuple[str, float, str, float]]],
+    weekly_proj: dict[int, dict[str, float]],
+    as_of_week: int,
+    playoff_teams_n: int,
+    trials: int = 400,
+    variance_mult: float = 1.0,
+    actual_weight: float = 0.3,
+) -> pd.DataFrame:
+    """Monte Carlo projection of next rookie-draft slot for every team, as of
+    the end of `as_of_week` (0 = before any games).
+
+    Weeks <= as_of_week use REAL results. Later regular-season weeks are
+    simulated from Sleeper's per-week optimal-lineup projections, blended
+    with each team's real scoring average so far (`actual_weight`).
+
+    Slot rule (an approximation of a standard rookie draft): the non-playoff
+    teams pick first, worst record first; playoff teams follow in reverse
+    seed order, with the simulated champion picking last.
+    """
+    n_teams = len(all_teams)
+    if n_teams == 0:
+        return pd.DataFrame()
+    playoff_teams_n = max(0, min(playoff_teams_n, n_teams))
+
+    wins = {t: 0.0 for t in all_teams}
+    pf = {t: 0.0 for t in all_teams}
+    scores: dict[str, list[float]] = {t: [] for t in all_teams}
+    for wk in sorted(results):
+        if wk > as_of_week:
+            continue
+        for a, pa, b, pb in results[wk]:
+            scores.setdefault(a, []).append(pa)
+            scores.setdefault(b, []).append(pb)
+            pf[a] = pf.get(a, 0.0) + pa
+            pf[b] = pf.get(b, 0.0) + pb
+            if pa > pb:
+                wins[a] += 1
+            elif pb > pa:
+                wins[b] += 1
+            else:
+                wins[a] += 0.5
+                wins[b] += 0.5
+
+    def actual_mean(t: str) -> float | None:
+        s = scores.get(t) or []
+        return sum(s) / len(s) if s else None
+
+    def team_std(t: str) -> float:
+        s = scores.get(t) or []
+        if len(s) >= 4:
+            base = float(pd.Series(s).std())
+            base = max(base, 15.0)
+        else:
+            base = 30.0
+        return base * variance_mult
+
+    def mean_for(t: str, wk: int) -> float:
+        proj = weekly_proj.get(wk, {}).get(t)
+        act = actual_mean(t)
+        if proj is not None and act is not None:
+            return (1 - actual_weight) * proj + actual_weight * act
+        if proj is not None:
+            return proj
+        if act is not None:
+            return act
+        return 100.0
+
+    def overall_mean(t: str) -> float:
+        vals = [weekly_proj[w][t] for w in weekly_proj if w > as_of_week and t in weekly_proj[w]]
+        act = actual_mean(t)
+        if vals:
+            proj = sum(vals) / len(vals)
+            return (1 - actual_weight) * proj + actual_weight * act if act is not None else proj
+        return act if act is not None else 100.0
+
+    future = [(wk, results[wk]) for wk in sorted(results) if wk > as_of_week]
+    slot_counts = {t: [0] * n_teams for t in all_teams}
+    win_tot = {t: 0.0 for t in all_teams}
+    playoff_ct = {t: 0 for t in all_teams}
+
+    for _ in range(trials):
+        w = dict(wins)
+        p = dict(pf)
+        for wk, pairs in future:
+            for a, _pa, b, _pb in pairs:
+                sa = random.gauss(mean_for(a, wk), team_std(a))
+                sb = random.gauss(mean_for(b, wk), team_std(b))
+                p[a] += sa
+                p[b] += sb
+                if sa >= sb:
+                    w[a] += 1
+                else:
+                    w[b] += 1
+        ranked = sorted(all_teams, key=lambda t: (-w[t], -p[t]))
+        seeds = ranked[:playoff_teams_n]
+        champion = simulate_bracket_once(seeds, overall_mean, team_std) if seeds else ""
+        non_playoff = list(reversed(ranked[playoff_teams_n:]))  # worst record picks first
+        playoff_order = [t for t in reversed(seeds) if t != champion]
+        if champion:
+            playoff_order.append(champion)
+        order = non_playoff + playoff_order
+        for i, t in enumerate(order):
+            slot_counts[t][i] += 1
+        for t in all_teams:
+            win_tot[t] += w[t]
+        for t in seeds:
+            playoff_ct[t] += 1
+
+    rows = []
+    for t in all_teams:
+        dist = [c / trials for c in slot_counts[t]]
+        rows.append(
+            {
+                "Team": t,
+                "Avg Slot": round(sum((i + 1) * pr for i, pr in enumerate(dist)), 2),
+                "Pick 1.01 %": round(dist[0] * 100, 1),
+                "Top 3 %": round(sum(dist[:3]) * 100, 1),
+                "Top 6 %": round(sum(dist[:6]) * 100, 1),
+                "Avg Final Wins": round(win_tot[t] / trials, 1),
+                "Playoff %": round(playoff_ct[t] / trials * 100, 1),
+                "Dist": dist,
+            }
+        )
+    out = pd.DataFrame(rows).sort_values("Avg Slot").reset_index(drop=True)
+    out["Proj Slot"] = range(1, len(out) + 1)
+    return out
+
+
+def render_projected_picks(bundle: dict[str, Any], teams: pd.DataFrame, picks: pd.DataFrame) -> None:
+    render_brand(
+        "Projected Picks",
+        "Where every team's next rookie pick is headed — re-simulated from real results, week by week",
+    )
+    league = bundle["league"]
+    league_id = str(league.get("league_id") or LEAGUE_ID)
+    settings = league.get("settings") or {}
+    playoff_week_start = int(settings.get("playoff_week_start") or 15)
+    playoff_teams_n = int(settings.get("playoff_teams") or 6)
+    users = {str(u.get("user_id")): team_name(u) for u in bundle["users"]}
+    roster_to_team = {
+        int(r["roster_id"]): users.get(str(r.get("owner_id")), f"Roster {r['roster_id']}")
+        for r in bundle["rosters"]
+    }
+    all_teams = list(roster_to_team.values())
+    state = load_nfl_state()
+    proj_season = int(state.get("season") or league.get("season") or 2026)
+    completed = detect_completed_weeks(league_id)
+    completed = min(completed, playoff_week_start - 1)
+
+    st.caption(
+        "Our own Monte Carlo model, not an official order. Completed weeks use REAL results; remaining "
+        "weeks use Sleeper's weekly projections for each team's best possible lineup (blended with "
+        "how the team has actually scored) against the real remaining schedule. Draft slots assume "
+        "non-playoff teams pick first (worst record first), then playoff teams in reverse seed order "
+        "with the champion last. The week-by-week history re-runs the model as of each past week "
+        "using today's rosters for the projections, so it shows how the picture moved, not an exact "
+        "archive of what the app would have said then. If your commissioner sets a different order "
+        "(lottery, consolation bracket), treat this as directional."
+    )
+
+    c1, c2 = st.columns(2)
+    trials = c1.slider("Simulation trials (current week)", 200, 2000, 600, 100)
+    show_round2 = c2.checkbox("Also show 2nd-round picks", value=False)
+
+    weeks = list(range(1, playoff_week_start))
+    with st.spinner("Simulating draft order..."):
+        results = build_regular_season_results(league_id, roster_to_team, weeks)
+        weekly_proj = build_weekly_team_projections(bundle, weeks, proj_season, roster_to_team)
+        cache_key = ("proj_picks_history", league_id, completed, trials)
+        if st.session_state.get("proj_picks_key") != cache_key:
+            history_trials = max(120, min(200, trials // 3))
+            frames = {}
+            for wk in range(0, completed + 1):
+                sim = simulate_draft_order(
+                    all_teams, results, weekly_proj, wk, playoff_teams_n,
+                    trials=trials if wk == completed else history_trials,
+                )
+                frames[wk] = sim
+            st.session_state["proj_picks_key"] = cache_key
+            st.session_state["proj_picks_frames"] = frames
+        frames = st.session_state["proj_picks_frames"]
+
+    current = frames[completed].copy()
+    prev = frames.get(completed - 1)
+    prev_slot = dict(zip(prev["Team"], prev["Proj Slot"])) if prev is not None else {}
+    record = {}
+    for r in bundle["rosters"]:
+        s = r.get("settings") or {}
+        record[roster_to_team[int(r["roster_id"])]] = f"{int(s.get('wins') or 0)}-{int(s.get('losses') or 0)}" + (
+            f"-{int(s.get('ties') or 0)}" if int(s.get("ties") or 0) else ""
+        )
+
+    label = f"after Week {completed}" if completed > 0 else "preseason (no games played)"
+    st.markdown(f"### Projected Draft Order — {label}")
+
+    def move(t: str) -> str:
+        if t not in prev_slot:
+            return "—"
+        d = prev_slot[t] - int(current.loc[current["Team"] == t, "Proj Slot"].iloc[0])
+        return "▲ %d" % d if d > 0 else ("▼ %d" % -d if d < 0 else "–")
+
+    table = pd.DataFrame(
+        {
+            "Pick": current["Proj Slot"],
+            "Team": current["Team"],
+            "Record": current["Team"].map(record),
+            "Proj Wins": current["Avg Final Wins"],
+            "Avg Slot": current["Avg Slot"],
+            "1.01 %": current["Pick 1.01 %"],
+            "Top 3 %": current["Top 3 %"],
+            "Playoff %": current["Playoff %"],
+            "vs last week": current["Team"].map(move),
+        }
+    )
+    st.dataframe(table, use_container_width=True, hide_index=True)
+
+    # ---- Pick cards: who actually owns each projected pick ----
+    st.markdown("### Who Holds Each Projected Pick")
+    upcoming = int(picks["Season"].min()) if not picks.empty else proj_season + 1
+    n_teams = len(all_teams) or 12
+    slot_of = dict(zip(current["Team"], current["Proj Slot"]))
+    dist_of = {t: d for t, d in zip(current["Team"], current["Dist"])}
+    rounds = [1, 2] if show_round2 else [1]
+    for rnd in rounds:
+        sub = picks[(picks["Season"] == upcoming) & (picks["Round"] == rnd)].copy()
+        if sub.empty:
+            st.info(f"No {upcoming} round-{rnd} picks found.")
+            continue
+        sub["Proj Slot"] = sub["Original Team"].map(slot_of)
+        sub = sub.sort_values("Proj Slot")
+        mult = slot_value_multipliers(n_teams, rnd)
+        rows = []
+        for _, pk in sub.iterrows():
+            orig = pk["Original Team"]
+            slot = int(pk["Proj Slot"]) if pd.notna(pk["Proj Slot"]) else None
+            cur_mult = mult.get(pk["Slot"]) if pd.notna(pk["Slot"]) else None
+            base = pk["Value"] / cur_mult if cur_mult else pk["Value"]
+            exp_mult = sum(p * mult.get(i + 1, 1.0) for i, p in enumerate(dist_of.get(orig, [])))
+            rows.append(
+                {
+                    "Pick": f"{upcoming} {rnd}.{slot:02d}" if slot else f"{upcoming} R{rnd}",
+                    "Original Team": orig,
+                    "Held By": pk["Current Owner"] + (" (traded)" if pk["Traded"] else ""),
+                    "Expected Value": round(base * exp_mult),
+                    "Value at Mode Slot": round(base * mult.get(slot, 1.0)) if slot else None,
+                }
+            )
+        st.markdown(f"**Round {rnd}**")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    mine = current[current["Team"] == MY_TEAM_NAME]
+    if not mine.empty:
+        row = mine.iloc[0]
+        st.info(
+            f"{MY_TEAM_NAME}: projected to pick #{int(row['Proj Slot'])} "
+            f"(avg slot {row['Avg Slot']:.1f}) — {row['Pick 1.01 %']:.1f}% chance at 1.01, "
+            f"{row['Top 3 %']:.1f}% top 3, {row['Playoff %']:.0f}% to make the playoffs."
+        )
+
+    # ---- Week-by-week movement ----
+    st.markdown("### Week-by-Week Movement")
+    hist_rows = []
+    for wk, df in frames.items():
+        for _, r in df.iterrows():
+            hist_rows.append({"Week": wk, "Team": r["Team"], "Avg Slot": r["Avg Slot"]})
+    hist = pd.DataFrame(hist_rows)
+    if completed == 0:
+        st.caption("History builds as weeks complete — only the baseline exists so far.")
+    pivot = hist.pivot(index="Team", columns="Week", values="Avg Slot")
+    pivot.columns = ["Pre" if c == 0 else f"W{c}" for c in pivot.columns]
+    pivot = pivot.sort_values(pivot.columns[-1])
+    st.markdown("Average projected pick slot (1 = first pick) as of each week")
+    st.dataframe(pivot.round(1), use_container_width=True)
+
+    focus = st.multiselect(
+        "Teams on the chart",
+        sorted(all_teams),
+        default=[MY_TEAM_NAME] if MY_TEAM_NAME in all_teams else sorted(all_teams)[:3],
+    )
+    if focus:
+        try:
+            import altair as alt
+
+            chart_df = hist[hist["Team"].isin(focus)]
+            chart = (
+                alt.Chart(chart_df)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("Week:O", title="As of week (0 = preseason)"),
+                    y=alt.Y("Avg Slot:Q", scale=alt.Scale(reverse=True, domain=[1, n_teams]), title="Avg projected pick"),
+                    color="Team:N",
+                )
+            )
+            st.altair_chart(chart, use_container_width=True)
+        except Exception:
+            st.line_chart(hist[hist["Team"].isin(focus)].pivot(index="Week", columns="Team", values="Avg Slot"))
+
+
 def build_player_avg_lookup(league_id: str, through_week: int) -> dict[str, float]:
     """League-wide season-average points per player, built from every team's
     completed-week matchup data — used to fill in projections for players
@@ -6033,7 +6353,7 @@ def main() -> None:
     st.sidebar.markdown("## 🏈 Front Office")
     page = st.sidebar.radio(
         "Navigation",
-        ["My Team", "Team Blueprint", "League", "League Projections", "League Analyzer", "Rankings", "Team Needs", "Roster Lab", "Draft Capital", "Draft History", "Trade History", "Mock Draft"],
+        ["My Team", "Team Blueprint", "League", "League Projections", "Projected Picks", "League Analyzer", "Rankings", "Team Needs", "Roster Lab", "Draft Capital", "Draft History", "Trade History", "Mock Draft"],
         label_visibility="collapsed",
     )
     st.sidebar.markdown("---")
@@ -6093,6 +6413,8 @@ def main() -> None:
         render_power_rankings(teams, players, picks)
     elif page == "League Projections":
         render_league_projections(bundle, teams, players)
+    elif page == "Projected Picks":
+        render_projected_picks(bundle, teams, picks)
     elif page == "League Analyzer":
         render_league_analyzer(bundle, teams, players)
     elif page == "Rankings":
