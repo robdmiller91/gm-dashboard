@@ -4,8 +4,10 @@ from __future__ import annotations
 import html
 import math
 import random
+import re
 import time
 import textwrap
+import urllib.parse
 from typing import Any
 
 import pandas as pd
@@ -1035,6 +1037,254 @@ st.markdown(
 )
 
 
+# ---------------------------------------------------------------------------
+# "Flock" theme layer — loaded after the base stylesheet so it wins. Pure
+# black canvas, Poppins, orange accent, tinted position badges, glowy cards.
+# ---------------------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+    @import url("https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800;900&display=swap");
+    :root {
+      --bg:#050505;
+      --sidebar:#0b0b0b;
+      --panel:#121212;
+      --panel2:#1a1a1a;
+      --border:#232323;
+      --text:#f5f5f5;
+      --muted:#8a8a8a;
+      --orange:#ff8a1f;
+      --orange2:#ffb347;
+      --qb:#3ddc97;
+      --rb:#3b9eff;
+      --wr:#ff4d79;
+      --te:#c84bff;
+      --pick:#ffb000;
+    }
+    html, body, .stApp, [data-testid="stSidebar"], button, input, textarea, select,
+    .stMarkdown, .stCaption, [data-testid="stMetric"] {
+      font-family:'Poppins', system-ui, -apple-system, sans-serif !important;
+    }
+    .stApp {
+      background:
+        radial-gradient(1200px 500px at 85% -10%, rgba(255,138,31,.07), transparent 60%),
+        var(--bg);
+    }
+    header[data-testid="stHeader"] { background:transparent; }
+    .block-container { padding-top:1.4rem; }
+    h1, h2, h3, h4 { font-weight:700 !important; letter-spacing:-.01em; }
+    [data-testid="stCaptionContainer"], .stCaption { color:var(--muted) !important; }
+    hr { border-color:var(--border) !important; }
+
+    /* ---------- Sidebar as an icon nav rail ---------- */
+    [data-testid="stSidebar"] { background:var(--sidebar); border-right:1px solid var(--border); }
+    [data-testid="stSidebar"] [role="radiogroup"] { gap:.2rem; }
+    [data-testid="stSidebar"] [role="radiogroup"] label {
+      padding:.55rem .75rem; border-radius:12px; margin:0;
+      transition:background .15s, color .15s; cursor:pointer; width:100%;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label:hover { background:var(--panel2); }
+    [data-testid="stSidebar"] [role="radiogroup"] label > div:first-child { display:none; }
+    [data-testid="stSidebar"] [role="radiogroup"] label p { font-size:.92rem; font-weight:500; color:#cfcfcf; }
+    [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+      background:linear-gradient(90deg, rgba(255,138,31,.18), rgba(255,138,31,.04));
+      box-shadow:inset 3px 0 0 var(--orange);
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) p { color:var(--orange); font-weight:700; }
+    .side-logo { display:flex; align-items:center; gap:.65rem; margin:.2rem 0 1.1rem; }
+    .side-logo-mark {
+      width:42px; height:42px; border-radius:12px; display:grid; place-items:center;
+      background:linear-gradient(135deg,var(--orange),#ff5e1a); color:#111; font-weight:900;
+      box-shadow:0 6px 20px rgba(255,138,31,.35);
+    }
+    .side-logo-title { font-weight:800; font-size:1.05rem; line-height:1.1; }
+    .side-logo-sub { color:var(--muted); font-size:.72rem; }
+    .side-league {
+      background:var(--panel); border:1px solid var(--border); border-radius:14px;
+      padding:.75rem .85rem; margin:.4rem 0 .8rem;
+    }
+    .side-league-name { font-weight:600; font-size:.9rem; }
+    .side-league-team { color:var(--muted); font-size:.72rem; margin-top:.1rem; }
+
+    /* ---------- Widgets ---------- */
+    .stButton > button, .stDownloadButton > button {
+      background:var(--panel2); border:1px solid var(--border); color:var(--text);
+      border-radius:12px; font-weight:600; transition:all .15s;
+    }
+    .stButton > button:hover, .stDownloadButton > button:hover {
+      border-color:var(--orange); color:var(--orange); background:rgba(255,138,31,.08);
+    }
+    .stButton > button[kind="primary"] {
+      background:linear-gradient(135deg,var(--orange),#ff5e1a); color:#111; border:none;
+    }
+    [data-baseweb="select"] > div, [data-baseweb="input"] > div, .stTextInput input,
+    .stNumberInput input {
+      background:var(--panel) !important; border-color:var(--border) !important; border-radius:12px !important;
+    }
+    [data-baseweb="tag"] {
+      background:rgba(255,138,31,.15) !important; color:var(--orange) !important; border-radius:8px !important;
+    }
+    .stSlider [role="slider"] { background:var(--orange) !important; box-shadow:0 0 0 4px rgba(255,138,31,.2) !important; }
+    .stTabs [data-baseweb="tab-list"] {
+      gap:.4rem; background:var(--panel); padding:.35rem; border-radius:14px; border:1px solid var(--border);
+    }
+    .stTabs [data-baseweb="tab"] { border-radius:10px; padding:.35rem .9rem; height:auto; }
+    .stTabs [aria-selected="true"] { background:var(--panel2); color:var(--orange) !important; }
+    .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] { display:none; }
+    [data-testid="stExpander"] { background:var(--panel); border-radius:16px; }
+    div[data-testid="stDataFrame"] { border-radius:16px; }
+    [data-testid="stAlert"] { border-radius:14px; }
+
+    /* ---------- Page header ---------- */
+    .brand {
+      display:flex; align-items:center; gap:1rem; margin-bottom:1.25rem;
+      padding:1rem 1.2rem; border-radius:20px;
+      background:linear-gradient(135deg, #141414, #0d0d0d);
+      border:1px solid var(--border);
+    }
+    .brand-badge {
+      width:48px; height:48px; border-radius:14px; font-size:1.4rem;
+      background:linear-gradient(135deg,var(--orange),#ff5e1a);
+      border:none; color:#111; box-shadow:0 8px 24px rgba(255,138,31,.3);
+    }
+    .brand h1 { color:var(--orange); font-size:1.85rem; font-weight:800 !important; padding:0; }
+    .brand p { color:var(--muted); font-size:.85rem; }
+    .brand-chips { margin-left:auto; display:flex; gap:.5rem; flex-wrap:wrap; }
+    .brand-chip {
+      background:var(--panel2); border:1px solid var(--border); border-radius:12px;
+      padding:.45rem .8rem; font-size:.78rem; font-weight:600; color:#d4d4d4;
+    }
+    .brand-chip b { color:var(--orange); }
+
+    /* ---------- Cards & panels ---------- */
+    .panel, .summary-card, .league-header, .power-row, .trade-card, .matchup-card,
+    .dash-stat-card, .analyzer-table, .franchise-details {
+      background:var(--panel); border:1px solid var(--border); border-radius:18px;
+    }
+    .summary-card, .dash-stat-card { transition:transform .15s, border-color .15s; }
+    .summary-card:hover, .dash-stat-card:hover { transform:translateY(-2px); border-color:#333; }
+    .summary-value, .dash-stat-value { font-weight:800; }
+    .gm-card {
+      background:linear-gradient(135deg, rgba(255,138,31,.10), rgba(255,138,31,.02) 60%), var(--panel);
+      border:1px solid rgba(255,138,31,.25); border-radius:18px;
+    }
+    .league-avatar { background:linear-gradient(135deg,var(--orange),#ff5e1a); color:#111; }
+    .window, .franchise-status {
+      background:rgba(255,138,31,.15); color:var(--orange); border:1px solid rgba(255,138,31,.3);
+    }
+    .franchise-details { padding:.6rem .8rem; }
+
+    /* Tinted, outlined position badges (Flock style) */
+    .pos-pill {
+      border-radius:7px; padding:.12rem .45rem; font-size:.7rem; font-weight:600;
+      border:1px solid currentColor; background:transparent;
+    }
+    .pos-pill.qb-bg { color:var(--qb); background:rgba(61,220,151,.12); }
+    .pos-pill.rb-bg { color:var(--rb); background:rgba(59,158,255,.12); }
+    .pos-pill.wr-bg { color:var(--wr); background:rgba(255,77,121,.12); }
+    .pos-pill.te-bg { color:var(--te); background:rgba(200,75,255,.12); }
+    .pos-pill.pick-bg { color:var(--pick); background:rgba(255,176,0,.12); }
+    .pos-pill.idp-bg { color:#a3a3a3; background:rgba(163,163,163,.12); }
+    .player-card { border-radius:16px; background:var(--panel); transition:transform .15s, border-color .15s; }
+    .player-card:hover { transform:translateY(-3px); border-color:var(--orange); }
+    .player-photo, .draft-pick-photo { background:radial-gradient(circle at 50% 80%, #262626, #101010); }
+
+    /* ---------- Hero row (My Team) ---------- */
+    .hero-grid {
+      display:grid; grid-template-columns:minmax(240px,1fr) minmax(320px,1.5fr) minmax(420px,2fr);
+      gap:1rem; margin-bottom:1.1rem;
+    }
+    .hero-card {
+      background:var(--panel); border:1px solid var(--border); border-radius:20px; padding:1.1rem 1.25rem;
+    }
+    .hero-pill {
+      display:inline-block; background:linear-gradient(135deg,var(--orange),#ff5e1a); color:#111;
+      font-weight:800; font-size:.95rem; padding:.3rem .8rem; border-radius:10px;
+    }
+    .hero-label { color:var(--muted); font-size:.85rem; margin-top:.8rem; }
+    .hero-big { display:flex; align-items:center; gap:.7rem; flex-wrap:wrap; margin-top:.15rem; }
+    .hero-big-num { font-size:2.8rem; font-weight:800; line-height:1; }
+    .hero-big-num span { color:var(--orange); }
+    .hero-tag {
+      background:#f5b942; color:#111; font-weight:700; font-size:.8rem;
+      padding:.25rem .65rem; border-radius:8px;
+    }
+    .hero-title { font-weight:700; font-size:1.05rem; margin-bottom:.6rem; }
+    .pb-row { display:grid; grid-template-columns:34px 1fr 44px; align-items:center; gap:.6rem; margin:.38rem 0; }
+    .pb-label { font-size:.78rem; font-weight:700; }
+    .pb-track { height:10px; background:#1f1f1f; border-radius:999px; overflow:hidden; }
+    .pb-fill { height:100%; border-radius:999px; }
+    .pb-pct { font-size:.72rem; color:var(--muted); text-align:right; }
+
+    .tile-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:.7rem; height:100%; }
+    a.action-tile, a.action-tile:hover { text-decoration:none !important; color:#fff !important; }
+    .action-tile {
+      position:relative; overflow:hidden; border-radius:18px; padding:.9rem .7rem;
+      display:flex; flex-direction:column; align-items:center; justify-content:flex-end;
+      min-height:132px; text-align:center; transition:transform .18s, box-shadow .18s;
+      border:1px solid rgba(255,255,255,.08);
+    }
+    .action-tile:hover { transform:translateY(-4px) scale(1.02); box-shadow:0 14px 30px rgba(0,0,0,.5); }
+    .action-tile .tile-icon { font-size:2.3rem; margin-bottom:auto; padding-top:.3rem; filter:drop-shadow(0 4px 10px rgba(0,0,0,.4)); }
+    .action-tile .tile-name { font-weight:800; font-size:1rem; line-height:1.1; }
+    .action-tile .tile-sub { font-size:.66rem; opacity:.85; }
+    .tile-purple { background:linear-gradient(160deg,#a43bd6,#4b1670); }
+    .tile-teal   { background:linear-gradient(160deg,#20a39b,#0d4d4f); }
+    .tile-green  { background:linear-gradient(160deg,#6fbf3b,#2b5e17); }
+    .tile-blue   { background:linear-gradient(160deg,#3b7ff0,#123d8c); }
+    .tile-red    { background:linear-gradient(160deg,#ff4d4d,#8a1212); }
+
+    /* ---------- Exposure-style roster table ---------- */
+    .xp-head, .xp-row {
+      display:grid; grid-template-columns:minmax(220px,2.2fr) 90px 110px 90px minmax(160px,2fr);
+      gap:.8rem; align-items:center; padding:.5rem .9rem;
+    }
+    .xp-head {
+      color:var(--muted); font-size:.74rem; font-weight:600;
+      border-bottom:1px solid var(--border);
+    }
+    .xp-head .sorted { color:var(--orange); }
+    .xp-row {
+      background:#0f0f0f; border-radius:12px; margin-top:.35rem; font-size:.84rem;
+      transition:background .12s;
+    }
+    .xp-row:hover { background:#181818; }
+    .xp-player { display:flex; align-items:center; gap:.6rem; min-width:0; }
+    .xp-player img {
+      width:32px; height:32px; border-radius:8px; object-fit:cover; object-position:top;
+      background:#1d1d1d; flex-shrink:0;
+    }
+    .xp-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#e5e5e5; }
+    .xp-num { text-align:center; font-variant-numeric:tabular-nums; color:#d4d4d4; }
+    .xp-up { color:#3ddc84; font-weight:700; font-size:.76rem; }
+    .xp-down { color:#ff5f5f; font-weight:700; font-size:.76rem; }
+    .xp-bar { display:flex; align-items:center; gap:.7rem; }
+    .xp-track { flex:1; height:6px; background:#262626; border-radius:999px; overflow:hidden; }
+    .xp-fill { height:100%; border-radius:999px; }
+    .xp-bar span { font-size:.74rem; color:var(--muted); width:2.6rem; text-align:right; }
+    .xp-scroll { overflow-x:auto; }
+    .xp-inner { min-width:720px; }
+    .section-head { display:flex; align-items:center; gap:.6rem; margin:1.1rem 0 .6rem; }
+    .section-head h3 { margin:0; font-size:1.25rem; }
+    .count-chip {
+      background:var(--panel2); border:1px solid var(--border); color:#cfcfcf;
+      border-radius:10px; padding:.2rem .6rem; font-size:.75rem; font-weight:600;
+    }
+
+    @media (max-width: 1300px) {
+      .hero-grid { grid-template-columns:1fr 1fr; }
+      .hero-grid > :last-child { grid-column:1 / -1; }
+    }
+    @media (max-width: 800px) {
+      .hero-grid { grid-template-columns:1fr; }
+      .tile-grid { grid-template-columns:repeat(2,1fr); }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
 class DataError(RuntimeError):
     pass
 
@@ -1767,17 +2017,138 @@ def pos_class(pos: str) -> str:
     }.get(pos, "idp-bg")
 
 
+PAGE_ICONS = {
+    "My Team": "🏠", "Team Blueprint": "🧬", "League": "🏆", "League Projections": "📡",
+    "Projected Picks": "🎯", "League Analyzer": "📊", "Player Rankings": "📈", "Team Needs": "🧩",
+    "Roster Lab": "🧪", "Draft Capital": "💰", "Draft History": "📜", "Trade History": "🔁",
+    "Mock Draft": "🎲",
+}
+
+
 def render_brand(title: str, subtitle: str) -> None:
+    icon = PAGE_ICONS.get(title, "🏈")
     render_html(
         f"""
         <div class="brand">
-          <div class="brand-badge">FO</div>
+          <div class="brand-badge">{icon}</div>
           <div>
             <h1>{clean(title)}</h1>
             <p>{clean(subtitle)}</p>
           </div>
+          <div class="brand-chips">
+            <div class="brand-chip">🏈 Weekend Warriors</div>
+            <div class="brand-chip"><b>●</b> {clean(MY_TEAM_NAME)}</div>
+          </div>
         </div>
         """
+    )
+
+
+def page_link(page: str) -> str:
+    """Query-string link that main() reads to switch pages — lets HTML tiles navigate."""
+    return "?page=" + urllib.parse.quote(page)
+
+
+def render_team_hero(teams: pd.DataFrame, row: pd.Series) -> None:
+    """Flock-style hero row: league percentile, position breakdown bars, action tiles."""
+    total = len(teams)
+
+    def pct_better(rank: int) -> int:
+        # Share of the league this team is at least as good as (rank 1 -> 100%).
+        return round((total - rank + 1) / total * 100) if total else 0
+
+    top_pct = max(1, round(int(row["Overall_Rank"]) / total * 100)) if total else 100
+    tag = "Elite" if top_pct <= 20 else "Strong" if top_pct <= 40 else "Average" if top_pct <= 65 else "Building"
+
+    bars = "".join(
+        f'<div class="pb-row"><span class="pb-label" style="color:{color}">{label}</span>'
+        f'<div class="pb-track"><div class="pb-fill" style="width:{pct_better(int(row[col]))}%;background:{color}"></div></div>'
+        f'<span class="pb-pct">#{int(row[col])} · {pct_better(int(row[col]))}%</span></div>'
+        for label, col, color in [
+            ("QB", "QB_Rank", "var(--qb)"), ("RB", "RB_Rank", "var(--rb)"),
+            ("WR", "WR_Rank", "var(--wr)"), ("TE", "TE_Rank", "var(--te)"),
+            ("PK", "Pick_Rank", "var(--pick)"),
+        ]
+    )
+
+    tiles = [
+        ("Roster Lab", "🔄", "Trade", "Sandbox", "tile-purple"),
+        ("Team Blueprint", "🧠", "Team", "Blueprint", "tile-teal"),
+        ("Team Needs", "💬", "Needs", "Trade ideas", "tile-green"),
+        ("Mock Draft", "🎲", "Draft", "Mock it", "tile-blue"),
+    ]
+    tiles_html = "".join(
+        f'<a class="action-tile {cls}" href="{page_link(page)}" target="_self">'
+        f'<div class="tile-icon">{icon}</div><div class="tile-name">{name}</div>'
+        f'<div class="tile-sub">{sub}</div></a>'
+        for page, icon, name, sub, cls in tiles
+    )
+
+    render_html(
+        f"""
+        <div class="hero-grid">
+          <div class="hero-card">
+            <span class="hero-pill">#{int(row["Overall_Rank"])} of {total}</span>
+            <div class="hero-label">League Percentile</div>
+            <div class="hero-big">
+              <div class="hero-big-num">Top <span>{top_pct}%</span></div>
+              <div class="hero-tag">{tag}</div>
+            </div>
+            <div class="hero-label" style="margin-top:.6rem">Window · <b style="color:var(--orange)">{clean(row["Window"])}</b></div>
+          </div>
+          <div class="hero-card">
+            <div class="hero-title">Position Breakdown</div>
+            {bars}
+          </div>
+          <div class="hero-card" style="padding:.75rem">
+            <div class="tile-grid">{tiles_html}</div>
+          </div>
+        </div>
+        """
+    )
+
+
+def render_roster_exposure(roster: pd.DataFrame, limit: int = 25) -> None:
+    """Flock 'Player Exposure'-style table: photo, tinted position badge, trend
+    arrow, value, and a bar showing each player's value relative to the roster's top asset."""
+    data = roster[roster["Value"] > 0].sort_values("Value", ascending=False).head(limit)
+    if data.empty:
+        return
+    top = max(int(data["Value"].max()), 1)
+    colors = {"QB": "var(--qb)", "RB": "var(--rb)", "WR": "var(--wr)", "TE": "var(--te)"}
+    fallback = "https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png"
+
+    rows = []
+    for _, r in data.iterrows():
+        trend = int(r["Trend"] or 0)
+        trend_html = (
+            f'<span class="xp-up">↑{trend:,}</span>' if trend > 0
+            else f'<span class="xp-down">↓{abs(trend):,}</span>' if trend < 0 else ""
+        )
+        pos_rank = "—" if pd.isna(r["Position Rank"]) else f'{clean(r["Position"])}{int(r["Position Rank"])}'
+        share = round(int(r["Value"]) / top * 100)
+        rows.append(
+            f'<div class="xp-row">'
+            f'<div class="xp-player"><img src="{clean(r["Image"])}" onerror="this.onerror=null;this.src=\'{fallback}\';">'
+            f'<span class="xp-name">{clean(r["Player"])}</span>'
+            f'<span class="pos-pill {pos_class(r["Position"])}">{clean(r["Position"])}</span>{trend_html}</div>'
+            f'<div class="xp-num">{clean(r["Status"])}</div>'
+            f'<div class="xp-num">{pos_rank}</div>'
+            f'<div class="xp-num">{int(r["Value"]):,}</div>'
+            f'<div class="xp-bar"><div class="xp-track"><div class="xp-fill" '
+            f'style="width:{share}%;background:{colors.get(r["Position"], "#a3a3a3")}"></div></div>'
+            f'<span>{share}%</span></div>'
+            f'</div>'
+        )
+
+    render_html(
+        f'<div class="section-head"><h3>Player Values</h3><span class="count-chip">{len(data)} Players</span></div>'
+        f'<div class="hero-card"><div class="xp-scroll"><div class="xp-inner">'
+        f'<div class="xp-head"><span>Player</span><span style="text-align:center">Status</span>'
+        f'<span style="text-align:center">Pos Rank</span><span class="sorted" style="text-align:center">Value ↓</span>'
+        f'<span style="text-align:center">vs. Top Asset</span></div>'
+        + "".join(rows)
+        + '</div></div></div>'
     )
 
 
@@ -2419,6 +2790,7 @@ def render_team_review(
         """
     )
 
+    render_team_hero(teams, row)
     render_summary_cards(row)
 
     with st.expander("Where is the 30-Day Trend coming from?", expanded=False):
@@ -2429,6 +2801,8 @@ def render_team_review(
     render_html('<div class="section-title"><h3>Roster</h3><span style="color:#98a2b3">Scroll horizontally</span></div>')
     cards = "".join(render_player_card(r) for _, r in roster.head(18).iterrows())
     render_html(f'<div class="roster-strip">{cards}</div>')
+
+    render_roster_exposure(roster)
 
     render_html('<div class="section-title"><h3>Roster Construction</h3></div>')
     cols = st.columns([1, 1, 1.2, 1, 1.1], gap="small")
@@ -6388,15 +6762,36 @@ def render_mock_draft(
 
 
 def main() -> None:
-    st.sidebar.markdown("## 🏈 Front Office")
+    pages = [
+        "My Team", "Team Blueprint", "League", "League Projections", "Projected Picks",
+        "League Analyzer", "Rankings", "Team Needs", "Roster Lab", "Draft Capital",
+        "Draft History", "Trade History", "Mock Draft",
+    ]
+    nav_icons = {**PAGE_ICONS, "Rankings": "📈"}
+
+    with st.sidebar:
+        render_html(
+            '<div class="side-logo"><div class="side-logo-mark">FO</div><div>'
+            '<div class="side-logo-title">Front Office</div>'
+            '<div class="side-logo-sub">Dynasty command center</div></div></div>'
+            '<div class="side-league"><div class="side-league-name">🏈 Weekend Warriors</div>'
+            f'<div class="side-league-team">{clean(MY_TEAM_NAME)}</div></div>'
+        )
+
+    # Action tiles link via ?page=..., so the query string drives the default
+    # selection, and the radio writes its choice back to keep the two in sync.
+    requested = st.query_params.get("page")
+    default_index = pages.index(requested) if requested in pages else 0
     page = st.sidebar.radio(
         "Navigation",
-        ["My Team", "Team Blueprint", "League", "League Projections", "Projected Picks", "League Analyzer", "Rankings", "Team Needs", "Roster Lab", "Draft Capital", "Draft History", "Trade History", "Mock Draft"],
+        pages,
+        index=default_index,
+        format_func=lambda p: f"{nav_icons.get(p, '•')}  {p}",
         label_visibility="collapsed",
     )
+    if st.query_params.get("page") != page:
+        st.query_params["page"] = page
     st.sidebar.markdown("---")
-    st.sidebar.caption("Weekend Warriors")
-    st.sidebar.caption(MY_TEAM_NAME)
     if st.sidebar.button("Refresh data", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
