@@ -3938,7 +3938,7 @@ def render_team_needs(
     else:
         acquire_pool = build_asset_pool(players, picks, exclude_teams=[my_team], show_team_label=True)
     acquire_pool.update(rookie_asset_pool(bundle, fc_rows, players, 2026))
-    acquire_pool.update(devy_asset_pool(2027))
+    acquire_pool.update(devy_asset_pool(2027, league_is_superflex(bundle['league']), int(bundle['league'].get('season') or 2026)))
 
     c1, c2 = st.columns(2)
     with c1:
@@ -4253,7 +4253,7 @@ def render_roster_lab(
     else:
         acquire_pool = build_asset_pool(players, picks, exclude_teams=[my_team], show_team_label=True)
     acquire_pool.update(rookie_asset_pool(bundle, fc_rows, players, 2026))
-    acquire_pool.update(devy_asset_pool(2027))
+    acquire_pool.update(devy_asset_pool(2027, league_is_superflex(bundle['league']), int(bundle['league'].get('season') or 2026)))
 
     c1, c2 = st.columns(2)
     with c1:
@@ -4649,7 +4649,36 @@ def load_devy_prospects(path: str = DEVY_PROSPECTS_PATH) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def build_devy_pool(devy_df: pd.DataFrame, season: int) -> pd.DataFrame:
+DEVY_ELITE_PREMIUM = {1: 1.35, 2: 1.12, 3: 1.05}
+DEVY_ONE_QB_QB_FACTOR = 1.0  # board is already 1QB-native; no further QB adjustment
+
+
+def league_is_superflex(league: dict[str, Any]) -> bool:
+    return "SUPER_FLEX" in (league.get("roster_positions") or [])
+
+
+def devy_value(rank: int, position: str, season: int, current_season: int,
+               superflex: bool, total_slots: int = 12) -> int:
+    """Devy value on the SAME scale as this app's draft-pick values: a prospect
+    ranked Nth is worth what the Nth pick of that class is worth (round base x
+    year discount x slot multiplier), with a premium for the few true
+    blue-chip prospects (a consensus 1.01 is worth more than the pick, since the
+    pick only becomes him if you win the lottery on his ranking), and a
+    discount for QBs in 1QB leagues. The CSV board is built from 1QB sources,
+    so no extra QB adjustment is applied here."""
+    round_base = {1: 4300, 2: 1800, 3: 800, 4: 350, 5: 150}
+    year_factor = {0: 1.0, 1: 0.88, 2: 0.76}.get(max(season - current_season, 0), 0.70)
+    rnd = (rank - 1) // total_slots + 1
+    slot = (rank - 1) % total_slots + 1
+    mult = slot_value_multipliers(total_slots, rnd).get(slot, 1.0)
+    value = round_base.get(rnd, 75) * year_factor * mult * DEVY_ELITE_PREMIUM.get(rank, 1.0)
+    if position == "QB" and not superflex:
+        value *= DEVY_ONE_QB_QB_FACTOR
+    return int(round(value))
+
+
+def build_devy_pool(devy_df: pd.DataFrame, season: int, superflex: bool = True,
+                    current_season: int = 2026) -> pd.DataFrame:
     if devy_df.empty:
         return pd.DataFrame()
     view = devy_df[devy_df["Season"] == season].copy()
@@ -4657,9 +4686,21 @@ def build_devy_pool(devy_df: pd.DataFrame, season: int) -> pd.DataFrame:
         return pd.DataFrame()
 
     view = view.sort_values("Consensus Rank").reset_index(drop=True)
+    # Pick-scale values dip into a cliff at each round boundary (1.12 < 2.01),
+    # which would wrongly reorder prospects; a lower-ranked prospect should
+    # never be worth more than a higher-ranked one, so enforce a running minimum
+    # on the position-neutral value before any QB adjustment.
+    base_values: list[int] = []
+    for r in view["Consensus Rank"]:
+        v = devy_value(int(r), "WR", season, current_season, True)
+        base_values.append(min(v, base_values[-1]) if base_values else v)
+    view["Value"] = [
+        int(round(v * (DEVY_ONE_QB_QB_FACTOR if (p == "QB" and not superflex) else 1.0)))
+        for v, p in zip(base_values, view["Position"])
+    ]
+    # Re-rank by value so 1QB leagues push QBs down the board.
+    view = view.sort_values(["Value", "Consensus Rank"], ascending=[False, True]).reset_index(drop=True)
     view["Prospect Rank"] = range(1, len(view) + 1)
-    top_rank = view["Consensus Rank"].max()
-    view["Value"] = ((top_rank - view["Consensus Rank"] + 1) * 40).astype(int)
     view["Search Rank"] = view["Consensus Rank"]
     view["NFL Team"] = view["School"]
     view["Age"] = None
@@ -4671,25 +4712,18 @@ def build_devy_pool(devy_df: pd.DataFrame, season: int) -> pd.DataFrame:
     ]
 
 
-def devy_prospect_assets(season: int = 2027) -> list[dict[str, Any]]:
-    """Speculative devy prospects as optional hypothetical trade/roster assets.
-
-    Values are rescaled to roughly the ballpark of a discounted future rookie
-    pick — NOT on the same market footing as FantasyCalc's real dynasty values,
-    since these players haven't even been drafted by an NFL team yet. Any
-    projection involving these is a rough directional sketch, not a real
-    trade proposal or roster move Sleeper (or any market) would recognize.
-    """
-    pool = build_devy_pool(load_devy_prospects(), season)
+def devy_prospect_assets(season: int = 2027, superflex: bool = True,
+                         current_season: int = 2026) -> list[dict[str, Any]]:
+    """Devy prospects as optional hypothetical trade/roster assets, valued on
+    the same scale as draft picks (see devy_value). Still speculative: these
+    players haven't been drafted, so any trade involving them is a sketch that
+    Sleeper itself would not recognize."""
+    pool = build_devy_pool(load_devy_prospects(), season, superflex, current_season)
     if pool.empty:
         return []
-    max_rank = int(pool["Prospect Rank"].max())
-    top_value = 4300 * 0.55  # discounted vs. a real, already-existing 2027 1.01
-    floor_value = 400
     assets = []
     for _, row in pool.iterrows():
-        frac = (max_rank - row["Prospect Rank"]) / max(max_rank - 1, 1)
-        value = round(floor_value + (top_value - floor_value) * (frac ** 1.3))
+        value = int(row["Value"])
         assets.append(
             {
                 "label": f'🔮 {row["Player"]} · {row["Position"]} · {row["NFL Team"]} · {value:,} (2027 devy)',
@@ -4701,8 +4735,9 @@ def devy_prospect_assets(season: int = 2027) -> list[dict[str, Any]]:
     return assets
 
 
-def devy_asset_pool(season: int = 2027) -> dict[str, dict[str, Any]]:
-    return {a["label"]: a for a in devy_prospect_assets(season)}
+def devy_asset_pool(season: int = 2027, superflex: bool = True,
+                    current_season: int = 2026) -> dict[str, dict[str, Any]]:
+    return {a["label"]: a for a in devy_prospect_assets(season, superflex, current_season)}
 
 
 def unrostered_rookie_assets(
@@ -6264,7 +6299,7 @@ def render_mock_draft(
         st.dataframe(order_df, hide_index=True, use_container_width=True)
 
     rookies = build_rookies(bundle, fc_rows, int(season), default_season)
-    devy_pool = build_devy_pool(load_devy_prospects(), int(season))
+    devy_pool = build_devy_pool(load_devy_prospects(), int(season), league_is_superflex(bundle['league']), default_season)
 
     using_devy_pool = False
     if int(season) > default_season and len(rookies) < 12 and not devy_pool.empty:
@@ -6274,9 +6309,12 @@ def render_mock_draft(
             f'<div class="gm-card"><b>Using a devy consensus board for {int(season)}:</b> '
             "Sleeper doesn't have real NFL players for this class yet, since the actual draft "
             "hasn't happened. This pool is aggregated from public dynasty rookie mock-draft "
-            "coverage (Dynasty Nerds, Dynasty League Football, DraftSharks, FootballGuys forums, "
-            "Roto Street Journal, FlurrySports, NFL Mock Draft Database) as of when "
-            f"<code>{clean(DEVY_PROSPECTS_PATH)}</code> was last updated. Treat it as directional "
+            "coverage for 1QB leagues (Dynasty League Football 1QB mock of Oct 16, Dynasty Nerds 1QB mock of "
+            "Sept 15, plus QB-stripped superflex lists for depth), blended with extra weight on the most recent, then nudged for 2026 performance and "
+            "availability (see the Perf Adj column in "
+            f"<code>{clean(DEVY_PROSPECTS_PATH)}</code>). Values sit on the same scale as pick values: "
+            "a prospect is worth what the pick that would select him is worth, with a premium for the "
+            "blue-chip few, with no superflex QB inflation. Treat it as directional "
             "— players will transfer, get injured, declare early, or return to school between now "
             "and the real draft. Refresh the CSV from current mock drafts periodically.</div>"
         )
